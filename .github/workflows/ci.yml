@@ -41,9 +41,6 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
 
-      - name: Validate OpenAPI spec and route drift
-        run: npm run validate:openapi
-
       - name: Lint (ESLint)
         run: npm run lint
 
@@ -73,6 +70,5 @@ jobs:
 
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
-        continue-on-error: true
         with:
           fail-on-severity: moderate

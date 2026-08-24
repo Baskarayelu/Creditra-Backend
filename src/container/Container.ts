@@ -18,43 +18,19 @@
  */
 import { type CreditLineRepository } from "../repositories/interfaces/CreditLineRepository.js";
 import { type RiskEvaluationRepository } from "../repositories/interfaces/RiskEvaluationRepository.js";
-import { type RiskSignalRepository } from "../repositories/interfaces/RiskSignalRepository.js";
 import { type TransactionRepository } from "../repositories/interfaces/TransactionRepository.js";
 import { getConnection, type DbClient } from "../db/client.js";
-import {
-  createDbTransactionRunner,
-  passthroughTransactionRunner,
-  type TransactionRunner,
-} from "../db/transaction.js";
 import { InMemoryCreditLineRepository } from "../repositories/memory/InMemoryCreditLineRepository.js";
 import { InMemoryRiskEvaluationRepository } from "../repositories/memory/InMemoryRiskEvaluationRepository.js";
-import { InMemoryRiskSignalRepository } from "../repositories/memory/InMemoryRiskSignalRepository.js";
 import { InMemoryTransactionRepository } from "../repositories/memory/InMemoryTransactionRepository.js";
 import { PostgresCreditLineRepository } from "../repositories/postgres/PostgresCreditLineRepository.js";
-import { PostgresRiskEvaluationRepository } from "../repositories/postgres/PostgresRiskEvaluationRepository.js";
-import { PostgresRiskSignalRepository } from "../repositories/postgres/PostgresRiskSignalRepository.js";
-import { PostgresTransactionRepository } from "../repositories/postgres/PostgresTransactionRepository.js";
 import { CreditLineService } from "../services/CreditLineService.js";
 import { RiskEvaluationService } from "../services/RiskEvaluationService.js";
-import { AnomalyDetectionService } from "../services/anomalyDetectionService.js";
 import { createRiskProvider } from "../services/providers/providerFactory.js";
-import { ReconciliationService, type SorobanRpcClient } from "../services/reconciliationService.js";
+import { ReconciliationService } from "../services/reconciliationService.js";
 import { ReconciliationWorker } from "../services/reconciliationWorker.js";
-import { createSorobanClient, resolveSorobanConfig } from "../services/sorobanClient.js";
+import { MockSorobanClient, resolveSorobanConfig } from "../services/sorobanClient.js";
 import { defaultJobQueue } from "../services/jobQueue.js";
-import { defaultEventBus } from "../services/events/eventBus.js";
-import { registerAuditSubscriber } from "../services/events/auditSubscriber.js";
-import { registerAnomalySubscriber } from "../services/events/anomalySubscriber.js";
-import { DataRetentionService } from "../services/dataRetentionService.js";
-import { DataRetentionWorker } from "../services/dataRetentionWorker.js";
-import { DashboardSummaryService } from "../services/dashboardSummaryService.js";
-import {
-  InMemoryDomainEventStore,
-  PostgresDomainEventStore,
-  type DomainEventStore,
-} from "../services/domainEventStore.js";
-import { registerDomainEventStoreSubscriber } from "../services/events/domainEventSubscriber.js";
-import { loadAnomalyDetectionConfig } from "../config/anomalyDetection.js";
 
 export class Container {
   private static instance: Container;
@@ -66,135 +42,36 @@ export class Container {
   private _creditLineRepository!: CreditLineRepository;
   private _riskEvaluationRepository!: RiskEvaluationRepository;
   private _transactionRepository!: TransactionRepository;
-  private _riskSignalRepository!: RiskSignalRepository;
 
   // Services
-  private _creditLineService!: CreditLineService;
-  private _riskEvaluationService!: RiskEvaluationService;
-  private _anomalyDetectionService!: AnomalyDetectionService;
-  private _reconciliationService!: ReconciliationService;
-  private _reconciliationWorker!: ReconciliationWorker;
-  private _sorobanClient!: SorobanRpcClient;
-  private _dashboardSummaryService!: DashboardSummaryService;
-  private _dataRetentionService?: DataRetentionService;
-  private _dataRetentionWorker?: DataRetentionWorker;
-  private _dashboardSummaryService!: DashboardSummaryService;
-
-  // In-process domain event bus (credit lifecycle).
-  private readonly _eventBus = defaultEventBus;
-  private _anomalyUnsubscribe?: () => void;
-  private _domainEventStore!: DomainEventStore;
-  private _domainEventUnsubscribe?: () => void;
+  private _creditLineService: CreditLineService;
+  private _riskEvaluationService: RiskEvaluationService;
+  private _reconciliationService: ReconciliationService;
+  private _reconciliationWorker: ReconciliationWorker;
 
   private constructor() {
     // Initialize repositories based on environment
     this.initializeRepositories();
 
-    // Wire the in-process domain event bus and its default subscribers once.
-    registerAuditSubscriber(this._eventBus);
-
     // Initialize services
-    this._sorobanClient = createSorobanClient(resolveSorobanConfig());
-    this.rebuildServices();
-  }
-
-  private rebuildServices(): void {
-    // Prefer a real BEGIN/COMMIT boundary when Postgres is wired; otherwise
-    // passthrough so unit tests and in-memory mode keep working without a DB.
-    this._runInTransaction = this._dbClient
-      ? createDbTransactionRunner(this._dbClient)
-      : passthroughTransactionRunner;
-
-    this._creditLineService = new CreditLineService(
-      this._creditLineRepository,
-      this._eventBus,
-      {
-        transactionRepository: this._transactionRepository,
-        runInTransaction: this._runInTransaction,
-      },
-    );
+    this._creditLineService = new CreditLineService(this._creditLineRepository);
     this._riskEvaluationService = new RiskEvaluationService(
       this._riskEvaluationRepository,
       createRiskProvider(),
     );
-    this._anomalyDetectionService = new AnomalyDetectionService(
-      this._riskSignalRepository,
-      loadAnomalyDetectionConfig(),
-    );
-    // Re-bind anomaly subscriber so it always targets the current service instance.
-    this._anomalyUnsubscribe?.();
-    this._anomalyUnsubscribe = registerAnomalySubscriber(
-      this._eventBus,
-      this._anomalyDetectionService,
-    );
+    
+    // Initialize Soroban client and reconciliation services
+    const sorobanConfig = resolveSorobanConfig();
+    const sorobanClient = new MockSorobanClient(sorobanConfig);
     this._reconciliationService = new ReconciliationService(
       this._creditLineRepository,
-      this._sorobanClient,
+      sorobanClient,
       defaultJobQueue,
     );
     this._reconciliationWorker = new ReconciliationWorker(
       this._reconciliationService,
       defaultJobQueue,
     );
-    this._dashboardSummaryService = new DashboardSummaryService(
-      this._creditLineRepository,
-    );
-
-    // Data retention requires a real Postgres connection (pgcrypto digest(),
-    // borrowers.anonymized_at) — unavailable for in-memory/test repositories.
-    if (this._dbClient) {
-      this._dataRetentionService = new DataRetentionService(this._dbClient);
-      this._dataRetentionWorker = new DataRetentionWorker(
-        this._dataRetentionService,
-        defaultJobQueue,
-      );
-    }
-
-    if (!this._outboundWebhookDispatcher) {
-      this._outboundWebhookStore = this._dbClient
-        ? new PostgresOutboundWebhookStore(this._dbClient)
-        : new InMemoryOutboundWebhookStore();
-      this._outboundWebhookDispatcher = new OutboundWebhookDispatcher(
-        this._outboundWebhookStore,
-        defaultJobQueue,
-        this._eventBus,
-        {
-          secret: process.env["WEBHOOK_SECRET"] ?? "",
-          maxAttempts: Math.max(
-            1,
-            parseInt(process.env["WEBHOOK_MAX_RETRIES"] ?? "3", 10),
-          ),
-          timeoutMs: Math.max(
-            1,
-            parseInt(process.env["WEBHOOK_TIMEOUT_MS"] ?? "10000", 10),
-          ),
-          initialBackoffMs: Math.max(
-            0,
-            parseInt(process.env["WEBHOOK_INITIAL_BACKOFF_MS"] ?? "1000", 10),
-          ),
-        },
-      );
-      try {
-        const webhookConfig = resolveWebhookConfig();
-        void this._outboundWebhookDispatcher
-          .initializeFromEnvironment(webhookConfig.urls)
-          .catch((error) => {
-            console.error("[Container] Outbound webhook initialization failed:", error);
-          });
-      } catch (error) {
-        console.error("[Container] Outbound webhook configuration failed:", error);
-      }
-    }
-
-    if (!this._domainEventStore) {
-      this._domainEventStore = this._dbClient
-        ? new PostgresDomainEventStore(this._dbClient)
-        : new InMemoryDomainEventStore();
-      this._domainEventUnsubscribe = registerDomainEventStoreSubscriber(
-        this._eventBus,
-        this._domainEventStore,
-      );
-    }
   }
 
   private initializeRepositories(): void {
@@ -204,15 +81,14 @@ export class Container {
       // Use PostgreSQL repositories
       this._dbClient = getConnection();
       this._creditLineRepository = new PostgresCreditLineRepository(this._dbClient);
-      this._riskEvaluationRepository = new PostgresRiskEvaluationRepository(this._dbClient);
-      this._transactionRepository = new PostgresTransactionRepository(this._dbClient);
-      this._riskSignalRepository = new PostgresRiskSignalRepository(this._dbClient);
+      // TODO: Implement PostgreSQL versions of other repositories
+      this._riskEvaluationRepository = new InMemoryRiskEvaluationRepository();
+      this._transactionRepository = new InMemoryTransactionRepository();
     } else {
       // Use in-memory repositories (for development/testing)
       this._creditLineRepository = new InMemoryCreditLineRepository();
       this._riskEvaluationRepository = new InMemoryRiskEvaluationRepository();
       this._transactionRepository = new InMemoryTransactionRepository();
-      this._riskSignalRepository = new InMemoryRiskSignalRepository();
     }
   }
 
@@ -236,10 +112,6 @@ export class Container {
     return this._transactionRepository;
   }
 
-  get riskSignalRepository(): RiskSignalRepository {
-    return this._riskSignalRepository;
-  }
-
   // Service getters
   get creditLineService(): CreditLineService {
     return this._creditLineService;
@@ -247,10 +119,6 @@ export class Container {
 
   get riskEvaluationService(): RiskEvaluationService {
     return this._riskEvaluationService;
-  }
-
-  get anomalyDetectionService(): AnomalyDetectionService {
-    return this._anomalyDetectionService;
   }
 
   get reconciliationService(): ReconciliationService {
@@ -261,79 +129,30 @@ export class Container {
     return this._reconciliationWorker;
   }
 
-  get dashboardSummaryService(): DashboardSummaryService {
-    return this._dashboardSummaryService;
-  }
-
-  /** Process-wide in-process domain event bus for credit lifecycle events. */
-  get eventBus() {
-    return this._eventBus;
-  }
-
-  get outboundWebhookDispatcher(): OutboundWebhookDispatcher {
-    if (!this._outboundWebhookDispatcher) {
-      throw new Error('Outbound webhook dispatcher is not initialized');
-    }
-    return this._outboundWebhookDispatcher;
-  }
-
-  /** Durable replay log for credit lifecycle domain events. */
-  get domainEventStore(): DomainEventStore {
-    return this._domainEventStore;
-  }
-
-  /** Undefined when running against in-memory repositories (no Postgres connection). */
-  get dataRetentionWorker(): DataRetentionWorker | undefined {
-    return this._dataRetentionWorker;
-  }
-
-  get dashboardSummaryService(): DashboardSummaryService {
-    return this._dashboardSummaryService;
-  }
-
-  // Method to replace repositories
+  // Method to replace repositories (useful for testing or switching to DB implementations)
   public setRepositories(repositories: {
     creditLineRepository?: CreditLineRepository;
     riskEvaluationRepository?: RiskEvaluationRepository;
     transactionRepository?: TransactionRepository;
-    riskSignalRepository?: RiskSignalRepository;
   }): void {
-    let shouldRebuildServices = false;
-
     if (repositories.creditLineRepository) {
       this._creditLineRepository = repositories.creditLineRepository;
-      shouldRebuildServices = true;
+      this._creditLineService = new CreditLineService(
+        this._creditLineRepository,
+      );
     }
 
     if (repositories.riskEvaluationRepository) {
       this._riskEvaluationRepository = repositories.riskEvaluationRepository;
-      shouldRebuildServices = true;
+      this._riskEvaluationService = new RiskEvaluationService(
+        this._riskEvaluationRepository,
+        createRiskProvider(),
+      );
     }
 
     if (repositories.transactionRepository) {
       this._transactionRepository = repositories.transactionRepository;
-      // CreditLineService pairs ledger writes with draw/repay — rebuild so the
-      // service holds the latest TransactionRepository reference.
-      shouldRebuildServices = true;
     }
-
-    if (repositories.riskSignalRepository) {
-      this._riskSignalRepository = repositories.riskSignalRepository;
-      shouldRebuildServices = true;
-    }
-
-    if (shouldRebuildServices) {
-      this.rebuildServices();
-    }
-  }
-
-  public setSorobanClientForTesting(sorobanClient: SorobanRpcClient): void {
-    if (process.env.NODE_ENV !== 'test') {
-      throw new Error('setSorobanClientForTesting is test-only');
-    }
-
-    this._sorobanClient = sorobanClient;
-    this.rebuildServices();
   }
 
   /**
@@ -345,11 +164,6 @@ export class Container {
     // Stop reconciliation worker
     if (this._reconciliationWorker.isRunning()) {
       this._reconciliationWorker.stop();
-    }
-
-    // Stop data retention worker
-    if (this._dataRetentionWorker?.isRunning()) {
-      this._dataRetentionWorker.stop();
     }
 
     // Stop job queue

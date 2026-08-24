@@ -262,26 +262,14 @@ describe('Risk Routes', () => {
     });
 
     it('returns 404 for missing latest evaluation', async () => {
-      const missingWallet = 'G' + 'D'.repeat(55);
-      const response = await invokeRoute({
-        method: 'get',
-        path: '/wallet/:walletAddress/latest',
-        params: { walletAddress: missingWallet },
-      });
-
-      expect(response.status).toBe(404);
-      expect(response.body).toEqual({ data: null, error: 'No risk evaluation found for wallet' });
-    });
-
-    it('returns 400 for invalid wallet path param on latest', async () => {
       const response = await invokeRoute({
         method: 'get',
         path: '/wallet/:walletAddress/latest',
         params: { walletAddress: 'missing' },
       });
 
-      expect(response.status).toBe(400);
-      expect(response.body.error).toBe('Validation failed');
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({ data: null, error: 'No risk evaluation found for wallet' });
     });
 
     it('returns 500 when latest evaluation fetch throws', async () => {
@@ -389,161 +377,6 @@ describe('Risk Routes', () => {
         data: { message: 'Risk model recalibration triggered' },
         error: null,
       });
-    });
-  });
-
-  describe('GET /admin/signals', () => {
-    afterEach(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (typeof (container.riskSignalRepository as any).clear === 'function') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (container.riskSignalRepository as any).clear();
-      }
-      container.anomalyDetectionService.clearState();
-    });
-
-    it('requires API key', async () => {
-      const response = await invokeRoute({
-        method: 'get',
-        path: '/admin/signals',
-      });
-      expect(response.status).toBe(401);
-    });
-
-    it('lists signals for operators', async () => {
-      await container.riskSignalRepository.create({
-        signalType: 'rapid_successive_draws',
-        ruleId: 'rule.rapid_successive_draws',
-        severity: 'medium',
-        walletAddress: 'GBAHQCUPC7G2B4D2F2I2K2M2O2Q2S2U2W2Y2A2C2E2G2I2K2M2O2Q2S2',
-        creditLineId: '33333333-3333-3333-3333-333333333333',
-        correlationId: 'route-corr-1',
-        thresholds: { minCount: 3, windowSeconds: 300 },
-        evidence: { drawCount: 3 },
-      });
-
-      const response = await invokeRoute({
-        method: 'get',
-        path: '/admin/signals',
-        headers: { 'x-api-key': validApiKey },
-        query: { limit: 10 },
-      });
-
-      expect(response.status).toBe(200);
-      const body = response.body as {
-        data: { signals: Array<{ correlationId: string }>; total: number };
-        error: null;
-      };
-      expect(body.error).toBeNull();
-      expect(body.data.total).toBeGreaterThanOrEqual(1);
-      expect(body.data.signals.some((s) => s.correlationId === 'route-corr-1')).toBe(true);
-    });
-
-    it('returns a single signal by id', async () => {
-      const created = await container.riskSignalRepository.create({
-        signalType: 'draw_burst',
-        ruleId: 'rule.draw_burst',
-        severity: 'high',
-        walletAddress: 'GBAHQCUPC7G2B4D2F2I2K2M2O2Q2S2U2W2Y2A2C2E2G2I2K2M2O2Q2S2',
-        creditLineId: '44444444-4444-4444-4444-444444444444',
-        correlationId: 'route-corr-2',
-        thresholds: { minCount: 5 },
-        evidence: { drawCount: 5 },
-      });
-
-      const response = await invokeRoute({
-        method: 'get',
-        path: '/admin/signals/:id',
-        params: { id: created.id },
-        headers: { 'x-api-key': validApiKey },
-      });
-
-      expect(response.status).toBe(200);
-      expect((response.body as { data: { id: string } }).data.id).toBe(created.id);
-    });
-
-    it('returns 404 for missing signal', async () => {
-      const response = await invokeRoute({
-        method: 'get',
-        path: '/admin/signals/:id',
-        params: { id: '00000000-0000-0000-0000-000000000000' },
-        headers: { 'x-api-key': validApiKey },
-      });
-      expect(response.status).toBe(404);
-      expect(response.body).toEqual({ data: null, error: 'Risk signal not found' });
-    });
-  });
-
-  describe('POST /admin/policy-preview', () => {
-    const basePayload = {
-      walletAddress: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      creditScore: 80,
-      requestedAmount: 10_000_00,
-      kycLevel: 1,
-      lastDrawAt: null,
-      outstandingBalance: 0,
-    };
-
-    it('requires API key', async () => {
-      const response = await invokeRoute({
-        method: 'post',
-        path: '/admin/policy-preview',
-        body: basePayload,
-      });
-      expect(response.status).toBe(401);
-    });
-
-    it('rejects invalid API key', async () => {
-      const response = await invokeRoute({
-        method: 'post',
-        path: '/admin/policy-preview',
-        body: basePayload,
-        headers: { 'x-api-key': 'bad-key' },
-      });
-      expect(response.status).toBe(403);
-    });
-
-    it('returns an approved, explainable evaluation without persisting anything', async () => {
-      const response = await invokeRoute({
-        method: 'post',
-        path: '/admin/policy-preview',
-        body: basePayload,
-        headers: { 'x-api-key': validApiKey },
-      });
-
-      expect(response.status).toBe(200);
-      const body = response.body as {
-        data: { approved: boolean; rejections: unknown[]; evaluatedRules: string[] };
-      };
-      expect(body.data.approved).toBe(true);
-      expect(body.data.rejections).toEqual([]);
-      expect(body.data.evaluatedRules).toContain('credit-score-minimum');
-    });
-
-    it('returns rejection codes for a policy-failing input', async () => {
-      const response = await invokeRoute({
-        method: 'post',
-        path: '/admin/policy-preview',
-        body: { ...basePayload, creditScore: 10 },
-        headers: { 'x-api-key': validApiKey },
-      });
-
-      expect(response.status).toBe(200);
-      const body = response.body as {
-        data: { approved: boolean; rejections: Array<{ code: string }> };
-      };
-      expect(body.data.approved).toBe(false);
-      expect(body.data.rejections.map((r) => r.code)).toContain('CREDIT_SCORE_TOO_LOW');
-    });
-
-    it('rejects a malformed body with 400', async () => {
-      const response = await invokeRoute({
-        method: 'post',
-        path: '/admin/policy-preview',
-        body: { ...basePayload, walletAddress: 'not-a-wallet' },
-        headers: { 'x-api-key': validApiKey },
-      });
-      expect(response.status).toBe(400);
     });
   });
 });

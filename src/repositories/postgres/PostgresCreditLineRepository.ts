@@ -1,11 +1,6 @@
 import type { CreditLine, CreateCreditLineRequest, UpdateCreditLineRequest, CreditLineStatus } from '../../models/CreditLine.js';
 import type { CreditLineRepository, CursorPaginationResult } from '../interfaces/CreditLineRepository.js';
 import type { DbClient } from '../../db/client.js';
-import { VersionConflictError } from '../../services/creditService.js';
-import {
-  buildPageFromOverfetch,
-  decodeCursor,
-} from '../../utils/cursorPagination.js';
 
 interface CreditLineRow {
   id: string;
@@ -13,7 +8,6 @@ interface CreditLineRow {
   currency: string;
   status: string;
   interest_rate_bps: number;
-  version: number;
   created_at: Date;
   updated_at: Date;
   wallet_address: string;
@@ -26,26 +20,10 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
     // First, ensure borrower exists or create it
     const borrowerId = await this.ensureBorrower(request.walletAddress);
 
-    // Application-level duplicate open check (mirrors partial unique index).
-    const openCheck = await this.client.query(
-      `SELECT cl.status FROM credit_lines cl
-       WHERE cl.borrower_id = $1 AND cl.status <> 'closed'
-       LIMIT 1`,
-      [borrowerId],
-    );
-    if (openCheck.rows.length > 0) {
-      const status = (openCheck.rows[0] as { status: string }).status;
-      throw duplicateResource(
-        'credit_line',
-        'An open credit line already exists for this wallet. Close it before opening another.',
-        { field: 'walletAddress', existingStatus: status },
-      );
-    }
-
     const query = `
       INSERT INTO credit_lines (borrower_id, credit_limit, currency, status, interest_rate_bps)
       VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, borrower_id, credit_limit, currency, status, interest_rate_bps, version, created_at, updated_at
+      RETURNING id, borrower_id, credit_limit, currency, status, interest_rate_bps, created_at, updated_at
     `;
 
     const values = [
@@ -56,22 +34,7 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
       request.interestRateBps
     ];
 
-    let result: { rows: unknown[] };
-    try {
-      result = await this.client.query(query, values);
-    } catch (err) {
-      const conflict = conflictFromUniqueViolation(err);
-      if (conflict) {
-        throw new ConflictError({
-          message:
-            'An open credit line already exists for this wallet. Close it before opening another.',
-          code: 'duplicate_resource',
-          resource: 'credit_line',
-          details: { field: 'walletAddress', reason: 'unique_constraint' },
-        });
-      }
-      throw err;
-    }
+    const result = await this.client.query(query, values);
     const row = result.rows[0] as {
       id: string;
       borrower_id: string;
@@ -79,7 +42,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
       currency: string;
       status: string;
       interest_rate_bps: number;
-      version: number;
       created_at: Date;
       updated_at: Date;
     };
@@ -95,7 +57,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
       utilized: '0',
       interestRateBps: row.interest_rate_bps,
       status: row.status as CreditLineStatus,
-      version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -109,7 +70,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
         cl.currency,
         cl.status,
         cl.interest_rate_bps,
-        cl.version,
         cl.created_at,
         cl.updated_at,
         b.wallet_address
@@ -140,7 +100,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
         cl.currency,
         cl.status,
         cl.interest_rate_bps,
-        cl.version,
         cl.created_at,
         cl.updated_at,
         b.wallet_address
@@ -169,7 +128,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
         cl.currency,
         cl.status,
         cl.interest_rate_bps,
-        cl.version,
         cl.created_at,
         cl.updated_at,
         b.wallet_address
@@ -190,13 +148,30 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
     return creditLines;
   }
 
-  async findAllWithCursor(cursor?: string, limit = 100): Promise<CursorPaginationResult<CreditLine>> {
-    const decoded = decodeCursor(cursor);
-    const whereClause = decoded
+  async findAllWithCursor(cursor?: string, limit = 100): Promise<CursorPaginationResult> {
+    let cursorTime: Date | null = null;
+    let cursorId: string | null = null;
+
+    if (cursor) {
+      try {
+        const decodedCursor = Buffer.from(cursor, 'base64').toString('utf-8');
+        const [timestamp, id] = decodedCursor.split('|');
+        const parsedTime = new Date(Number(timestamp));
+        if (!Number.isNaN(parsedTime.getTime()) && id) {
+          cursorTime = parsedTime;
+          cursorId = id;
+        }
+      } catch {
+        cursorTime = null;
+        cursorId = null;
+      }
+    }
+
+    const whereClause = cursorTime && cursorId
       ? 'WHERE (cl.created_at > $2 OR (cl.created_at = $2 AND cl.id > $3))'
       : '';
-    const values = decoded
-      ? [limit + 1, new Date(decoded.t), decoded.i]
+    const values = cursorTime && cursorId
+      ? [limit + 1, cursorTime, cursorId]
       : [limit + 1];
 
     const query = `
@@ -206,7 +181,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
         cl.currency,
         cl.status,
         cl.interest_rate_bps,
-        cl.version,
         cl.created_at,
         cl.updated_at,
         b.wallet_address
@@ -226,15 +200,16 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
       creditLines.push(this.toCreditLine(row, availableCredit));
     }
 
-    const page = buildPageFromOverfetch(creditLines, limit, (cl) => ({
-      t: cl.createdAt.getTime(),
-      i: cl.id,
-    }));
+    const hasMore = creditLines.length > limit;
+    const items = creditLines.slice(0, limit);
+    const lastItem = items[items.length - 1];
 
     return {
-      items: page.items,
-      hasMore: page.hasMore,
-      nextCursor: page.nextCursor,
+      items,
+      hasMore,
+      nextCursor: hasMore && lastItem
+        ? Buffer.from(`${lastItem.createdAt.getTime()}|${lastItem.id}`, 'utf-8').toString('base64')
+        : null,
     };
   }
 
@@ -264,34 +239,18 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
     }
 
     setParts.push(`updated_at = now()`);
-    setParts.push(`version = version + 1`);
     values.push(id); // For WHERE clause
-    const idParam = paramIndex++;
-
-    // Optimistic locking: when expectedVersion is supplied, only update the
-    // row if its stored version still matches; a zero-row result with an
-    // existing row then signals a concurrent-write conflict (HTTP 409).
-    let versionClause = '';
-    if (request.expectedVersion !== undefined) {
-      versionClause = ` AND version = $${paramIndex++}`;
-      values.push(request.expectedVersion);
-    }
 
     const query = `
-      UPDATE credit_lines
+      UPDATE credit_lines 
       SET ${setParts.join(', ')}
-      WHERE id = $${idParam}${versionClause}
+      WHERE id = $${paramIndex}
       RETURNING id
     `;
 
     const result = await this.client.query(query, values);
-
+    
     if (result.rows.length === 0) {
-      // Distinguish "row missing" (404) from "version mismatch" (409).
-      if (request.expectedVersion !== undefined && (await this.exists(id))) {
-        const current = await this.findById(id);
-        throw new VersionConflictError(id, request.expectedVersion, current?.version ?? -1);
-      }
       return null;
     }
 
@@ -332,28 +291,15 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
       return row.id;
     }
 
-    // Create new borrower — concurrent inserts race on wallet_address unique.
-    try {
-      const createQuery = `
-        INSERT INTO borrowers (wallet_address)
-        VALUES ($1)
-        RETURNING id
-      `;
-      const createResult = await this.client.query(createQuery, [walletAddress]);
-      const row = createResult.rows[0] as { id: string };
-      return row.id;
-    } catch (err) {
-      // Another writer won the race; re-select instead of leaking the 23505.
-      if (conflictFromUniqueViolation(err)) {
-        const retry = await this.client.query(findQuery, [walletAddress]);
-        if (retry.rows.length > 0) {
-          return (retry.rows[0] as { id: string }).id;
-        }
-      }
-      const conflict = conflictFromUniqueViolation(err);
-      if (conflict) throw conflict;
-      throw err;
-    }
+    // Create new borrower
+    const createQuery = `
+      INSERT INTO borrowers (wallet_address)
+      VALUES ($1)
+      RETURNING id
+    `;
+    const createResult = await this.client.query(createQuery, [walletAddress]);
+    const row = createResult.rows[0] as { id: string };
+    return row.id;
   }
 
   /**
@@ -372,35 +318,15 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
   }
 
   /**
-   * Calculate available credit by subtracting net utilization (draws minus
-   * repayments) from the credit limit. Draws (borrows) reduce available
-   * credit; repayments restore it. Failed/cancelled transactions are excluded.
+   * Calculate available credit by subtracting total draws from credit limit.
+   * For now, returns the full credit limit since we don't have transaction tracking yet.
    */
-  private async calculateAvailableCredit(creditLineId: string, creditLimit: string): Promise<string> {
-    const query = `
-      SELECT COALESCE(SUM(
-        CASE
-          WHEN type = 'borrow' THEN amount
-          WHEN type = 'repay'  THEN -amount
-          ELSE 0
-        END
-      ), 0) AS utilized
-      FROM transactions
-      WHERE credit_line_id = $1
-        AND status NOT IN ('failed', 'cancelled')
-    `;
-
-    const result = await this.client.query(query, [creditLineId]);
-    const row = result.rows[0] as { utilized: string } | undefined;
-    const utilized = Number.parseFloat(row?.utilized ?? '0');
-    const limit = Number.parseFloat(creditLimit);
-
-    if (!Number.isFinite(utilized) || !Number.isFinite(limit)) {
-      return creditLimit;
-    }
-
-    const available = Math.max(0, limit - Math.max(0, utilized));
-    return available.toString();
+  private async calculateAvailableCredit(_creditLineId: string, creditLimit: string): Promise<string> {
+    // TODO: When transaction repository is implemented, calculate:
+    // creditLimit - SUM(transactions where type = 'draw' and credit_line_id = creditLineId)
+    
+    // For now, return full credit limit
+    return creditLimit;
   }
 
   private calculateUtilized(creditLimit: string, availableCredit: string): string {
@@ -417,7 +343,6 @@ export class PostgresCreditLineRepository implements CreditLineRepository {
       utilized: this.calculateUtilized(row.credit_limit, availableCredit),
       interestRateBps: row.interest_rate_bps,
       status: row.status as CreditLineStatus,
-      version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

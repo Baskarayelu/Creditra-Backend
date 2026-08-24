@@ -1,6 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as crypto from 'node:crypto';
-import { forbidden, sendProblem, unauthorized } from '../errors/index.js';
 
 /**
  * Factory that returns a `requireApiKey` Express middleware.
@@ -16,12 +15,11 @@ import { forbidden, sendProblem, unauthorized } from '../errors/index.js';
  *   - The received key value is NEVER included in logs or responses.
  *   - 401  → header is absent (caller is unaware of auth).
  *   - 403  → header present but the key is invalid.
- *   - Errors use RFC 7807 problem+json with codes `unauthorized` / `forbidden`.
  */
 export function createApiKeyMiddleware(
     validKeysOrResolver: Set<string> | (() => Set<string>),
 ) {
-    const resolveKeys: () => string[] =
+    const resolveKeys: () => string[] = 
         typeof validKeysOrResolver === 'function'
             ? () => Array.from(validKeysOrResolver())
             : () => Array.from(validKeysOrResolver);
@@ -34,7 +32,7 @@ export function createApiKeyMiddleware(
         const provided = (Array.isArray(req.headers['x-api-key']) ? req.headers['x-api-key'][0] : req.headers['x-api-key']) || '';
 
         if (!provided) {
-            sendProblem(res, unauthorized('Unauthorized'));
+            res.status(401).json({ error: 'Unauthorized' });
             return;
         }
 
@@ -50,6 +48,6 @@ export function createApiKeyMiddleware(
             }
         }
 
-        sendProblem(res, forbidden('Forbidden'));
+        res.status(403).json({ error: 'Forbidden' });
     };
 }

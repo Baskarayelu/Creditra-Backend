@@ -9,7 +9,6 @@ The model supports:
 - **Borrowers** — Identities (e.g. wallet addresses) that can hold credit lines and receive risk evaluations.
 - **Credit lines** — Per-borrower credit facilities with limits, currency, and status.
 - **Risk evaluations** — Historical risk scores and suggested limits/rates for borrowers.
-- **Risk signals** — Rules-based anomaly detection outputs (rapid draws, draw bursts, unusual repay patterns) for operator review.
 - **Transactions** — Draws and repayments against credit lines.
 - **Events** — Immutable audit and domain events (e.g. from Horizon) for idempotency and replay.
 
@@ -102,7 +101,6 @@ Stores borrower identities. The main natural key is `wallet_address` (unique).
 | `wallet_address` | `text`       | NO       | Unique wallet/identity address       |
 | `created_at`     | `timestamptz`| NO       | Row creation time (default `now()`)  |
 | `updated_at`     | `timestamptz`| NO       | Row update time (default `now()`)    |
-| `anonymized_at`  | `timestamptz`| YES      | Set once the data retention job anonymizes `wallet_address`; see [docs/DATA_RETENTION.md](./DATA_RETENTION.md) |
 
 **Constraints:** `PRIMARY KEY (id)`, `UNIQUE (wallet_address)`.
 

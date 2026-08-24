@@ -76,7 +76,6 @@ A request enters through the Express router, is authenticated (`X-API-Key` or `X
 
 - Node.js **>= 20**
 - npm
-- Bash for `npm run dev:bootstrap` (Git Bash or WSL on Windows)
 - (Optional) Docker 24+ and Docker Compose v2 for the containerised dev loop
 - (Optional) k6 for load testing
 
@@ -88,51 +87,6 @@ cd Creditra-Backend
 npm install
 cp .env.example .env   # then fill in DATABASE_URL, API_KEYS, etc.
 ```
-
-### Local bootstrap
-
-For a reproducible local setup (Docker Compose Postgres + env template +
-migrations + schema validation + deterministic seed data):
-
-```bash
-npm run dev:bootstrap
-```
-
-What the script does:
-
-1. Validates that `.env.example` contains required keys (`DATABASE_URL`, `API_KEYS`)
-2. Creates `.env` from `.env.example` **only when `.env` is missing** (never overwrites)
-3. Runs `npm ci`
-4. Starts the Compose `db` service (`postgres:15`, host port `5432`)
-5. Waits until `DATABASE_URL` accepts connections
-6. Runs `npm run db:migrate` and `npm run db:validate`
-7. Loads idempotent local seed data from [`scripts/dev-seed.sql`](./scripts/dev-seed.sql)
-
-Flags (pass after `--` with npm):
-
-```bash
-npm run dev:bootstrap -- --skip-install   # reuse existing node_modules
-npm run dev:bootstrap -- --skip-compose   # use an already-running Postgres
-npm run dev:bootstrap -- --skip-migrate   # skip migrate + schema validate
-npm run dev:bootstrap -- --skip-seed      # skip seed SQL
-```
-
-**Secrets:** only `.env.example` (placeholders) is committed. Real keys stay in
-gitignored `.env`. Default local values match Compose
-(`postgresql://postgres:postgres@localhost:5432/creditra_db`, `API_KEYS=dev-api-key`).
-
-**Common failures**
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Missing required command: docker` | Docker not installed / not on PATH | Install Docker Desktop, or use `--skip-compose` with your own DB |
-| `Database did not become reachable` | Engine not running, or port `5432` busy | Start Docker; free `5432`; check `DATABASE_URL` |
-| `node_modules/pg is missing` | Ran with `--skip-install` before deps | Drop the flag, or run `npm ci` first |
-| `bash: command not found` (Windows) | No Git Bash / WSL on PATH | Install [Git for Windows](https://git-scm.com/) or use WSL |
-| Migration fails on `wallet_address` of `credit_lines` | Stale DB volume from an old broken index migration | `docker compose down -v` then re-run bootstrap |
-
-Seeded demo wallet (local only):
-`GCKFBEIYV2U22IO2BJ4KVJOIP7XPWQGZBW3JXDC55CYIXB5NAXMCEKJA`.
 
 ### Run
 
@@ -161,7 +115,6 @@ npm run test:coverage     # v8 coverage, lcov + text
 npm run test:watch        # vitest in watch mode
 npm run lint              # eslint src/
 npm run typecheck         # tsc --noEmit
-npm run security:secrets  # Gitleaks secret scan
 ```
 
 ### Load
@@ -190,17 +143,14 @@ Every entry below is grounded in real files in this repo.
 | Surface | Path prefix | Mounted in |
 |---|---|---|
 | Health & readiness | `GET /health` | [`src/routes/health.ts`](./src/routes/health.ts) |
-| Credit lines (CRUD) | `/api/v1/credit/lines` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
-| Credit lines by wallet | `/api/v1/credit/wallet/:walletAddress/lines` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
-| Transactions | `/api/v1/credit/lines/:id/transactions` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
-| Draw / repay | `POST /api/v1/credit/lines/:id/{draw,repay}` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
-| Admin suspend / close | `POST /api/v1/credit/lines/:id/{suspend,close}` (admin auth) | [`src/routes/credit.ts`](./src/routes/credit.ts) |
-| Risk evaluation | `POST /api/v1/risk/evaluate`, history endpoints | [`src/routes/risk.ts`](./src/routes/risk.ts) |
-| Webhook config & test | `/api/v1/webhooks/*` | [`src/routes/webhook.ts`](./src/routes/webhook.ts) |
-| Reconciliation trigger / status | `/api/v1/reconciliation/*` (admin) | [`src/routes/reconciliation.ts`](./src/routes/reconciliation.ts) |
-
-Legacy unversioned `/api/*` paths remain mounted for compatibility and emit
-`Deprecation` / `Sunset` / `Link` headers. See [`docs/api-versioning.md`](./docs/api-versioning.md).
+| Credit lines (CRUD) | `/api/credit/lines` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
+| Credit lines by wallet | `/api/credit/wallet/:walletAddress/lines` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
+| Transactions | `/api/credit/lines/:id/transactions` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
+| Draw / repay | `POST /api/credit/lines/:id/{draw,repay}` | [`src/routes/credit.ts`](./src/routes/credit.ts) |
+| Admin suspend / close | `POST /api/credit/lines/:id/{suspend,close}` (admin auth) | [`src/routes/credit.ts`](./src/routes/credit.ts) |
+| Risk evaluation | `POST /api/risk/evaluate`, history endpoints | [`src/routes/risk.ts`](./src/routes/risk.ts) |
+| Webhook config & test | `/api/webhooks/*` | [`src/routes/webhook.ts`](./src/routes/webhook.ts) |
+| Reconciliation trigger / status | `/api/reconciliation/*` (admin) | [`src/routes/reconciliation.ts`](./src/routes/reconciliation.ts) |
 | OpenAPI docs | `GET /docs`, `GET /docs.json` | [`src/index.ts`](./src/index.ts) |
 
 Full machine-readable spec: [`src/openapi.yaml`](./src/openapi.yaml). Human-readable inventory: [`docs/API.md`](./docs/API.md).
@@ -212,7 +162,7 @@ Full machine-readable spec: [`src/openapi.yaml`](./src/openapi.yaml). Human-read
 - **`ReconciliationService` / `ReconciliationWorker`** — periodic diff of DB credit lines vs on-chain state. Severity levels: `critical` (identity, limit, status) and `warning` (available credit, rate). Runs every hour by default (`RECONCILIATION_INTERVAL_MS`).
 - **`HorizonListener`** — Stellar Horizon poller with cursor persistence, exponential backoff + jitter, gap recovery, and SHA-256 idempotency cache (10k entries, LRU). Metrics exposed via `getMetrics()`.
 - **`SorobanRpcClient`** — read/submit wrapper with AbortController timeouts, retry budget, and Stellar key sanitization in error messages.
-- **`drawWebhookService`** — multi-URL HMAC-SHA256 webhook fan-out with delivery settings and connectivity probe.
+- **`drawWebhookService`** — multi-URL HMAC-SHA256 webhook fan-out with retry/backoff and connectivity probe.
 - **`jobQueue`** — in-process at-least-once queue with visibility timeout, attempt tracking, and dead-letter list.
 
 Implementation files: [`src/services/`](./src/services/), entry composition in [`src/container/Container.ts`](./src/container/Container.ts).
@@ -246,14 +196,10 @@ See [`docs/OBSERVABILITY.md`](./docs/OBSERVABILITY.md).
 
 - Constant-time API key check via `crypto.timingSafeEqual` ([`src/middleware/auth.ts`](./src/middleware/auth.ts)).
 - Admin endpoints gated by a separate header (`X-Admin-Api-Key`).
-- Per-endpoint request body limits (default 100 KiB, bulk 1 MiB) with explicit 413 problem+json; non-JSON mutating requests rejected with 415.
+- Request body capped at 100 kB; non-JSON mutating requests rejected with 415.
 - Per-route token-bucket rate limit emitting `X-RateLimit-*` headers ([`src/middleware/rateLimit.ts`](./src/middleware/rateLimit.ts)).
 - HMAC-SHA256 webhook signatures (`X-Webhook-Signature: sha256=…`).
 - Outbound HTTP guarded by [`src/utils/fetchWithTimeout.ts`](./src/utils/fetchWithTimeout.ts).
-- Helmet security headers (HSTS, CSP, `X-Frame-Options: DENY`, `nosniff`, referrer policy) via [`src/middleware/securityHeaders.ts`](./src/middleware/securityHeaders.ts).
-- Configurable `TRUST_PROXY` for reverse-proxy deployments so `req.ip` / rate limits see the real client ([`src/config/security.ts`](./src/config/security.ts)).
-
-**Production (behind a reverse proxy):** set `TRUST_PROXY=1` (or the hop count matching your topology). See [`docs/SECURITY.md`](./docs/SECURITY.md) §5.
 
 Full model: [`docs/SECURITY.md`](./docs/SECURITY.md) and [`SECURITY.md`](./SECURITY.md).
 
@@ -308,7 +254,6 @@ Creditra-Backend/
 | [`docs/API.md`](./docs/API.md) | Endpoint inventory, request/response shapes, error envelope, pagination |
 | [`docs/SIGNALS_INGEST.md`](./docs/SIGNALS_INGEST.md) | Behavioral signal pipeline → on-chain underwriting |
 | [`docs/SECURITY.md`](./docs/SECURITY.md) | Auth model, RBAC, validation, rate limiting, HMAC, secrets |
-| [`docs/webhook-subscribers.md`](./docs/webhook-subscribers.md) | Subscriber onboarding for outbound draw webhooks, HMAC verification, delivery settings, and idempotency |
 | [`docs/INDEXER.md`](./docs/INDEXER.md) | Horizon listener cursor model, reorg/gap handling, reconciliation |
 | [`docs/OBSERVABILITY.md`](./docs/OBSERVABILITY.md) | Logs, metrics, health probes, tracing strategy |
 | [`docs/TESTING.md`](./docs/TESTING.md) | Test pyramid, file counts, integration vs unit |
@@ -323,7 +268,6 @@ Creditra-Backend/
 | [`docs/load-testing.md`](./docs/load-testing.md) | k6 scripts and thresholds |
 | [`docs/security-checklist-backend.md`](./docs/security-checklist-backend.md) | Pre-deploy security checklist |
 | [`docs/security-pentest-checklist.md`](./docs/security-pentest-checklist.md) | Pentest prep checklist |
-| [`docs/secret-scanning.md`](./docs/secret-scanning.md) | Gitleaks CI/local guardrails and remediation steps |
 | [`docs/REPOSITORY_ARCHITECTURE.md`](./docs/REPOSITORY_ARCHITECTURE.md) | Repository / DIP layout |
 | [`docs/troubleshooting.md`](./docs/troubleshooting.md) | Common failure modes |
 
@@ -333,7 +277,7 @@ Creditra-Backend/
 
 - **Graceful shutdown.** `SIGTERM` and `SIGINT` close the HTTP server, stop the reconciliation worker, drain the job queue, and close the DB pool — bounded by `SHUTDOWN_TIMEOUT_MS` (default 30s).
 - **Hot key rotation.** `loadApiKeys()` is invoked per request via a resolver closure, so `API_KEYS` may be rotated without restart (e.g. via secret manager).
-- **Body limits.** Per-endpoint caps (default 100 KiB; `/api/credit/lines/bulk` 1 MiB). Oversize requests return `413 Payload Too Large` problem+json. See [`docs/body-limits.md`](./docs/body-limits.md) for env knobs and reverse-proxy recommendations.
+- **Body limits.** `express.json({ limit: '100kb' })`. Oversize requests are converted into a `413` via the global error handler.
 - **CORS.** Production deployments **must** set `CORS_ORIGINS` to a comma-separated allowlist; dev/test falls back to loopback origins ([`src/config/cors.ts`](./src/config/cors.ts)).
 
 ---

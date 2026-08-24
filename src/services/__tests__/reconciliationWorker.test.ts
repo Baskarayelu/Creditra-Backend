@@ -6,16 +6,6 @@ import type { CreditLine } from '../../models/CreditLine.js';
 import { CreditLineStatus } from '../../models/CreditLine.js';
 import { InMemoryJobQueue } from '../jobQueue.js';
 
-const serviceLoggerMock = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-}));
-
-vi.mock('../../utils/serviceLogger.js', () => ({
-  createServiceLogger: () => serviceLoggerMock,
-}));
-
 class MockCreditLineRepository implements Partial<CreditLineRepository> {
   private creditLines: CreditLine[] = [];
 
@@ -49,9 +39,6 @@ describe('ReconciliationWorker', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    serviceLoggerMock.info.mockReset();
-    serviceLoggerMock.warn.mockReset();
-    serviceLoggerMock.error.mockReset();
     mockRepo = new MockCreditLineRepository();
     mockClient = new MockSorobanClient();
     jobQueue = new InMemoryJobQueue(10, 20);
@@ -117,7 +104,9 @@ describe('ReconciliationWorker', () => {
       worker.start({ runImmediately: false });
       
       expect(worker.isRunning()).toBe(true);
-      expect(serviceLoggerMock.warn).toHaveBeenCalledWith('reconciliation-worker:already-running');
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Already running')
+      );
     });
 
     it('starts the job queue', () => {
@@ -148,7 +137,9 @@ describe('ReconciliationWorker', () => {
       worker.stop();
       worker.stop();
       
-      expect(serviceLoggerMock.warn).toHaveBeenCalledWith('reconciliation-worker:not-running');
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Not running')
+      );
     });
   });
 
@@ -160,9 +151,8 @@ describe('ReconciliationWorker', () => {
       worker.start({ runImmediately: true });
       await jobQueue.drain();
 
-      expect(serviceLoggerMock.info).toHaveBeenCalledWith(
-        'reconciliation-worker:job:complete',
-        expect.objectContaining({ totalChecked: 0 }),
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining('completed successfully')
       );
       expect(jobQueue.getFailedJobs()).toHaveLength(0);
     });
@@ -194,13 +184,8 @@ describe('ReconciliationWorker', () => {
       await vi.advanceTimersByTimeAsync(500);
       await jobQueue.drain();
 
-      expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-        'reconciliation-worker:mismatches-alert',
-        expect.objectContaining({
-          mismatchCount: 1,
-          criticalCount: 1,
-          warningCount: 0,
-        }),
+      expect(console.error).toHaveBeenCalledWith(
+        '[ReconciliationWorker] ALERT: Reconciliation found 1 mismatches (1 critical, 0 warnings)'
       );
       expect(jobQueue.getFailedJobs()).toHaveLength(1);
     });
@@ -233,13 +218,8 @@ describe('ReconciliationWorker', () => {
       worker.start({ runImmediately: true });
       await jobQueue.drain();
 
-      expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-        'reconciliation-worker:mismatches-alert',
-        expect.objectContaining({
-          mismatchCount: 1,
-          criticalCount: 0,
-          warningCount: 1,
-        }),
+      expect(console.error).toHaveBeenCalledWith(
+        '[ReconciliationWorker] ALERT: Reconciliation found 1 mismatches (0 critical, 1 warnings)'
       );
       expect(jobQueue.getFailedJobs()).toHaveLength(0); // Should succeed
     });
@@ -281,9 +261,8 @@ describe('ReconciliationWorker', () => {
       worker.start({ runImmediately: true });
       await jobQueue.drain();
 
-      expect(serviceLoggerMock.info).toHaveBeenCalledWith(
-        'reconciliation-worker:job:start',
-        expect.objectContaining({ attempt: 1 }),
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining('attempt 1')
       );
     });
   });

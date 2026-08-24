@@ -18,14 +18,7 @@ describe('errorHandler middleware', () => {
     const res = await request(buildApp()).get('/error');
 
     expect(res.status).toBe(500);
-    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
-    expect(res.body).toMatchObject({
-      data: null,
-      error: 'Internal server error',
-      code: 'internal_error',
-      status: 500,
-      title: 'Internal Server Error',
-    });
+    expect(res.body).toEqual({ data: null, error: 'Internal server error' });
     spy.mockRestore();
   });
 

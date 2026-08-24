@@ -10,55 +10,20 @@ import { creditRouter } from "./routes/credit.js";
 import { riskRouter } from "./routes/risk.js";
 import { healthRouter } from "./routes/health.js";
 import { webhookRouter } from "./routes/webhook.js";
-import { inboundWebhookRouter } from "./routes/inboundWebhooks.js";
-import { reconciliationRouter } from "./routes/reconciliation.js";
-import { exportsRouter } from "./routes/exports.js";
 import { errorHandler } from "./middleware/errorHandler.js";
-
 import { requestLogger } from "./middleware/requestLogger.js";
-import { sendProblem, unsupportedMediaType } from "./errors/index.js";
-import {
-  InMemoryRateLimitStore,
-  RedisRateLimitStore,
-  createAdminBypassChecker,
-  createIpKeyGenerator,
-  createRateLimitMiddleware,
-} from "./middleware/rateLimit.js";
+import { createIpKeyGenerator, createRateLimitMiddleware } from "./middleware/rateLimit.js";
 import { loadCorsPolicy, isAllowedCorsOrigin } from "./config/cors.js";
-import { loadApiVersionPolicy } from "./config/apiVersion.js";
-import { loadRateLimitConfig, loadRateLimitStoreConfig } from "./config/rateLimit.js";
-import { loadSecurityPosture } from "./config/security.js";
-import { validateEnv } from "./config/env.js";
-import { applySecurityPosture } from "./middleware/securityHeaders.js";
+import { loadRateLimitConfig } from "./config/rateLimit.js";
 import { Container } from "./container/Container.js";
-import { getConnection } from "./db/client.js";
 import { initializeWebhooks } from "./services/drawWebhookService.js";
-import {
-  InMemoryIdempotencyStore,
-  PostgresIdempotencyStore,
-} from "./services/idempotencyStore.js";
-import { logger } from "./utils/logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const isMain =
-  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
-const hasRedisRateLimitConfig =
-  process.env.RATE_LIMIT_REDIS_URL !== undefined ||
-  process.env.RATE_LIMIT_REDIS_FAILURE_MODE !== undefined;
-
-if (isMain && hasRedisRateLimitConfig) {
-  validateEnv();
-}
-
 const openapiSpec = yaml.parse(
   readFileSync(join(__dirname, "openapi.yaml"), "utf8"),
 ) as Record<string, unknown>;
 
 export const app = express();
-
-// Baseline security posture: trust proxy + Helmet headers (HSTS/CSP/XFO/…).
-// Must run before routes so every response, including errors, carries headers.
-applySecurityPosture(app, loadSecurityPosture());
 
 // ✅ Keep strict typing
 const port = Number(process.env.PORT ?? 3000);
@@ -70,73 +35,22 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(
 );
 
 const corsPolicy = loadCorsPolicy();
-const bodyLimitConfig = loadBodyLimitConfig();
 const rateLimitConfig = loadRateLimitConfig();
-const rateLimitStoreConfig = loadRateLimitStoreConfig();
-const createRateLimitStore = (namespace: string): InMemoryRateLimitStore | RedisRateLimitStore => {
-  if (rateLimitStoreConfig.redisUrl) {
-    return new RedisRateLimitStore({
-      url: rateLimitStoreConfig.redisUrl,
-      prefix: `creditra:ratelimit:${namespace}`,
-      failureMode: rateLimitStoreConfig.redisFailureMode,
-      onError: createRedisRateLimitErrorLogger(namespace),
-    });
-  }
-
-  return new InMemoryRateLimitStore();
-};
-const closeRateLimitStore = async (
-  store: InMemoryRateLimitStore | RedisRateLimitStore,
-): Promise<void> => {
-  if (store instanceof RedisRateLimitStore) {
-    await store.close();
-  }
-};
-function createRedisRateLimitErrorLogger(namespace: string): (error: unknown) => void {
-  let lastLoggedAt = 0;
-
-  return (error: unknown): void => {
-    const now = Date.now();
-    if (now - lastLoggedAt < 60_000) {
-      return;
-    }
-    lastLoggedAt = now;
-
-    logger.warn(
-      {
-        namespace,
-        failureMode: rateLimitStoreConfig.redisFailureMode,
-        error: error instanceof Error ? error.message : "unknown Redis error",
-      },
-      "Redis rate-limit store unavailable",
-    );
-  };
-}
 const appRateLimitConfig =
   process.env.NODE_ENV === "test"
     ? {
         default: { ...rateLimitConfig.default, maxRequests: Number.MAX_SAFE_INTEGER },
         evaluate: { ...rateLimitConfig.evaluate, maxRequests: Number.MAX_SAFE_INTEGER },
-        export: { ...rateLimitConfig.export, maxRequests: Number.MAX_SAFE_INTEGER },
       }
     : rateLimitConfig;
-const defaultRateLimitStore = createRateLimitStore("default");
-const evaluateRateLimitStore = createRateLimitStore("evaluate");
-const exportRateLimitStore = createRateLimitStore("export");
 const defaultRateLimit = createRateLimitMiddleware({
   ...appRateLimitConfig.default,
   keyGenerator: createIpKeyGenerator(),
-  skip: adminRateLimitBypass,
-}, defaultRateLimitStore);
+});
 const evaluateRateLimit = createRateLimitMiddleware({
   ...appRateLimitConfig.evaluate,
   keyGenerator: createIpKeyGenerator(),
-  skip: adminRateLimitBypass,
-}, evaluateRateLimitStore);
-const exportRateLimit = createRateLimitMiddleware({
-  ...appRateLimitConfig.export,
-  keyGenerator: createIpKeyGenerator(),
-}, exportRateLimitStore);
+});
 
 app.use(cors({
   origin(origin, callback) {
@@ -153,7 +67,7 @@ app.use((req, res, next) => {
   if (hasBody) {
     const ct = req.headers['content-type'] ?? '';
     if (!ct.includes('application/json')) {
-      sendProblem(res, unsupportedMediaType());
+      res.status(415).json({ data: null, error: 'Content-Type must be application/json' });
       return;
     }
   }
@@ -161,12 +75,10 @@ app.use((req, res, next) => {
 });
 
 // 100 kb hard cap; body-parser emits a 413 that errorHandler converts to a
-// structured response. `verify` captures the raw bytes for inbound webhook
-// HMAC verification (see docs/webhooks.md).
-app.use(express.json({ limit: '100kb', verify: captureRawBody }));
+// structured response.
+app.use(express.json({ limit: '100kb' }));
 
 app.use(requestLogger);
-app.use(createIdempotencyMiddleware(idempotencyStore));
 
 app.use("/health", healthRouter);
 
@@ -181,9 +93,6 @@ app.use("/api/risk/evaluate", evaluateRateLimit);
 app.use("/api/risk/wallet", defaultRateLimit);
 app.use("/api/risk", riskRouter);
 app.use("/api/webhooks", webhookRouter);
-app.use("/api/reconciliation", reconciliationRouter);
-// Admin compliance exports — strict rate limit + adminAuth inside the router.
-app.use("/api/admin/exports", exportRateLimit, exportsRouter);
 
 // Global error handler — must be registered after routes
 app.use(errorHandler);
@@ -191,6 +100,9 @@ app.use(errorHandler);
 /**
  * Normalised Startup Logic
  */
+const isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+
 if (isMain) {
   // Initialize webhooks before starting the server
   initializeWebhooks();
@@ -210,29 +122,6 @@ if (isMain) {
       runImmediately: process.env.RECONCILIATION_RUN_IMMEDIATELY !== "false",
     });
     console.log(`[ReconciliationWorker] Started with ${reconciliationInterval}ms interval`);
-
-    // Start data retention worker (no-op if running without Postgres)
-    if (process.env.DATA_RETENTION_ENABLED !== "false" && container.dataRetentionWorker) {
-      const retentionInterval = parseInt(
-        process.env.DATA_RETENTION_INTERVAL_MS ?? "86400000", // Default: 24 hours
-        10,
-      );
-      container.dataRetentionWorker.start({
-        intervalMs: retentionInterval,
-        runImmediately: process.env.DATA_RETENTION_RUN_IMMEDIATELY === "true",
-        retentionConfig: {
-          operationalRetentionDays: parseInt(
-            process.env.DATA_RETENTION_OPERATIONAL_DAYS ?? "90",
-            10,
-          ),
-          eventsRetentionDays: parseInt(
-            process.env.DATA_RETENTION_EVENTS_DAYS ?? "365",
-            10,
-          ),
-        },
-      });
-      console.log(`[DataRetentionWorker] Started with ${retentionInterval}ms interval`);
-    }
   });
 
   // ── Graceful Shutdown ───────────────────────────────────────────────────────
@@ -255,11 +144,6 @@ if (isMain) {
 
       const container = Container.getInstance();
       await container.shutdown();
-      await Promise.all([
-        closeRateLimitStore(defaultRateLimitStore),
-        closeRateLimitStore(evaluateRateLimitStore),
-        closeRateLimitStore(exportRateLimitStore),
-      ]);
 
       clearTimeout(forceExitTimeout);
       console.log("[Server] Shutdown complete. Process exiting.");

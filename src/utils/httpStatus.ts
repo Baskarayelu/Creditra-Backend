@@ -10,16 +10,12 @@
 export const HTTP_OK = 200 as const;
 export const HTTP_CREATED = 201 as const;
 export const HTTP_NO_CONTENT = 204 as const;
-/** RFC 9110 §15.4.5 — conditional GET matched; body omitted. */
-export const HTTP_NOT_MODIFIED = 304 as const;
 
 export const HTTP_BAD_REQUEST = 400 as const;
 export const HTTP_UNAUTHORIZED = 401 as const;
 export const HTTP_FORBIDDEN = 403 as const;
 export const HTTP_NOT_FOUND = 404 as const;
 export const HTTP_CONFLICT = 409 as const;
-export const HTTP_PAYLOAD_TOO_LARGE = 413 as const;
-export const HTTP_UNSUPPORTED_MEDIA_TYPE = 415 as const;
 export const HTTP_UNPROCESSABLE_ENTITY = 422 as const;
 export const HTTP_TOO_MANY_REQUESTS = 429 as const;
 

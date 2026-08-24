@@ -3,25 +3,20 @@
  *
  * Drives the protocol's "the chain saw your draw" notification path.
  * Subscriber URLs come from `WEBHOOK_URLS` (comma-separated) and the HMAC
- * secret from `WEBHOOK_SECRET`. Delivery settings include retry/backoff
- * controls exposed through the webhook config.
+ * secret from `WEBHOOK_SECRET`. Retries follow exponential backoff bounded
+ * by `WEBHOOK_MAX_RETRIES`.
  *
  * Signature contract sent to subscribers:
  * - `X-Webhook-Signature: sha256=<hex HMAC over raw body>`
- * - `X-Webhook-Timestamp: <payload ISO timestamp>`
+ * - `X-Webhook-Timestamp: <ms since epoch>`
  * - `User-Agent: Creditra-Webhook/1.0`
  *
  * Subscribers must (a) re-compute the HMAC and compare in constant time,
  * (b) reject timestamps outside their tolerance window, and
- * (c) deduplicate by `data.drawId`. See `docs/webhook-subscribers.md`.
+ * (c) deduplicate by `data.drawId`. See `docs/API.md` §Webhooks.
  */
 import { createHmac } from "node:crypto";
 import type { HorizonEvent } from "./horizonListener.js";
-import { getWebhookDeliveryStateStore } from "./webhookDeliveryState.js";
-import { redactLogArgs } from "../utils/logRedact.js";
-import { createServiceLogger } from "../utils/serviceLogger.js";
-
-const log = createServiceLogger("DrawWebhook");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -72,30 +67,6 @@ export interface WebhookDeliveryResult {
 // ---------------------------------------------------------------------------
 
 let activeConfig: WebhookConfig | null = null;
-
-/**
- * Runtime webhook subscriptions (in addition to env `WEBHOOK_URLS`).
- * Keyed by normalised URL so duplicate registration is O(1).
- * Secrets are never stored here — signing still uses config.secret.
- */
-const runtimeSubscriptions = new Map<string, { url: string; createdAt: string }>();
-
-/** Normalise a subscription URL for equality (trim trailing slash, lowercase host). */
-export function normaliseWebhookUrl(url: string): string {
-    const trimmed = url.trim();
-    try {
-        const parsed = new URL(trimmed);
-        parsed.hash = '';
-        // Drop default ports; keep path without trailing slash (except root).
-        let path = parsed.pathname;
-        if (path.length > 1 && path.endsWith('/')) {
-            path = path.slice(0, -1);
-        }
-        return `${parsed.protocol}//${parsed.host.toLowerCase()}${path}${parsed.search}`;
-    } catch {
-        return trimmed;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Configuration helpers
@@ -156,9 +127,19 @@ async function deliverWebhook(
     timeoutMs: number
 ): Promise<{ success: boolean; status?: number; error?: string }> {
     const payloadString = JSON.stringify(payload);
+    
+    const controller = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     try {
-        const response = await fetchWithTimeout(url, {
+        const timeout = new Promise<never>((_resolve, reject) => {
+            timeoutId = setTimeout(() => {
+                controller.abort();
+                reject(new Error("Request timeout"));
+            }, timeoutMs);
+        });
+
+        const response = await Promise.race([fetch(url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -167,12 +148,12 @@ async function deliverWebhook(
                 "User-Agent": "Creditra-Webhook/1.0"
             },
             body: payloadString,
-            timeouts: {
-                connectTimeoutMs: timeoutMs,
-                readTimeoutMs: 0,
-            },
-            retry: false,
-        });
+            signal: controller.signal
+        }), timeout]);
+
+        if (timeoutId !== undefined) {
+            clearTimeout(timeoutId);
+        }
 
         if (response.ok) {
             return { success: true, status: response.status };
@@ -184,8 +165,12 @@ async function deliverWebhook(
             };
         }
     } catch (error) {
+        if (timeoutId !== undefined) {
+            clearTimeout(timeoutId);
+        }
+        
         if (error instanceof Error) {
-            throw error;
+            throw error.name === "AbortError" ? new Error("Request timeout") : error;
         }
         
         throw new Error("Unknown error occurred");
@@ -213,7 +198,10 @@ async function retryWithBackoff<T>(
             lastError = error as Error;
             
             if (attempt <= maxRetries) {
-                log.warn({ attempt, retryInMs: delay, error: lastError }, "webhook:delivery:retry");
+                console.warn(
+                    `[DrawWebhook] Attempt ${attempt} failed, retrying in ${delay}ms:`,
+                    lastError.message
+                );
                 await new Promise(resolve => setTimeout(resolve, delay));
                 delay = Math.floor(delay * backoffMultiplier);
             }
@@ -250,7 +238,7 @@ function parseDrawConfirmedEvent(event: HorizonEvent): WebhookPayload | null {
             }
         };
     } catch (error) {
-        log.error({ error }, "webhook:event-parse:failed");
+        console.error("[DrawWebhook] Failed to parse event data:", error);
         return null;
     }
 }
@@ -260,110 +248,45 @@ function parseDrawConfirmedEvent(event: HorizonEvent): WebhookPayload | null {
 // ---------------------------------------------------------------------------
 
 export function getWebhookConfig(): WebhookConfig | null {
-    if (!activeConfig) return null;
-    // Merge env URLs with runtime subscriptions for a complete view.
-    const runtimeUrls = Array.from(runtimeSubscriptions.values()).map((s) => s.url);
-    const merged = Array.from(new Set([...activeConfig.urls, ...runtimeUrls]));
-    return { ...activeConfig, urls: merged };
+    return activeConfig;
 }
 
 export function initializeWebhooks(): void {
     try {
         activeConfig = resolveWebhookConfig();
-        log.info("webhook:initialized", {
+        console.log("[DrawWebhook] Initialized with config:", {
             urls: activeConfig.urls.length,
             maxRetries: activeConfig.maxRetries,
-            timeoutMs: activeConfig.timeoutMs,
+            timeoutMs: activeConfig.timeoutMs
         });
     } catch (error) {
-        log.error({ error }, "webhook:initialize:failed");
+        console.error("[DrawWebhook] Failed to initialize:", error);
         activeConfig = null;
     }
-}
-
-/**
- * Register a runtime webhook subscription URL.
- *
- * @throws {ConflictError} when the URL is already registered (env or runtime).
- * Message and details never include the full URL when it may carry secrets
- * (query tokens); only a non-sensitive field name is exposed.
- */
-export function registerWebhookSubscription(url: string): { url: string; createdAt: string } {
-    if (!url || typeof url !== 'string' || !url.trim()) {
-        throw new Error('Webhook URL is required');
-    }
-    const trimmed = url.trim();
-    try {
-        // Validate absolute http(s) URL without storing credentials in details.
-        const parsed = new URL(trimmed);
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-            throw new Error('Webhook URL must use http or https');
-        }
-    } catch (err) {
-        if (err instanceof Error && err.message.startsWith('Webhook URL')) throw err;
-        throw new Error('Webhook URL is invalid');
-    }
-
-    const key = normaliseWebhookUrl(trimmed);
-    const envUrls = activeConfig?.urls ?? [];
-    const envKeys = new Set(envUrls.map(normaliseWebhookUrl));
-
-    if (envKeys.has(key) || runtimeSubscriptions.has(key)) {
-        throw duplicateResource(
-            'webhook_subscription',
-            'A webhook subscription for this endpoint already exists.',
-            { field: 'url', reason: 'duplicate_url' },
-        );
-    }
-
-    const createdAt = new Date().toISOString();
-    const record = { url: trimmed, createdAt };
-    runtimeSubscriptions.set(key, record);
-    // Delivery reads getWebhookConfig() which merges env + runtime URLs.
-    return record;
-}
-
-/** List runtime subscriptions only (env URLs are visible via /config). */
-export function listRuntimeWebhookSubscriptions(): Array<{ url: string; createdAt: string }> {
-    return Array.from(runtimeSubscriptions.values());
-}
-
-/** Test helper: clear runtime subscriptions. */
-export function _resetRuntimeWebhookSubscriptions(): void {
-    runtimeSubscriptions.clear();
 }
 
 export async function sendDrawConfirmationWebhook(
     event: HorizonEvent
 ): Promise<WebhookDeliveryResult[]> {
     if (!activeConfig || activeConfig.urls.length === 0) {
-        log.info("webhook:delivery:disabled");
+        console.log("[DrawWebhook] No webhook URLs configured, skipping");
         return [];
     }
 
     const payload = parseDrawConfirmedEvent(event);
     if (!payload) {
-        log.info({ ledger: event.ledger, contractId: event.contractId }, "webhook:delivery:skipped-non-draw-event");
+        console.log("[DrawWebhook] Event is not a draw confirmation, skipping");
         return [];
     }
 
     const payloadString = JSON.stringify(payload);
     const signature = generateSignature(payloadString, activeConfig.secret);
 
-    log.info({ drawId: payload.data.drawId, deliveryCount: activeConfig.urls.length }, "webhook:delivery:start");
-
-    const store = getWebhookDeliveryStateStore();
+    console.log(
+        `[DrawWebhook] Processing draw confirmation for draw ID: ${payload.data.drawId}`
+    );
 
     const deliveryPromises = activeConfig.urls.map(async (url) => {
-        // Exactly-once: a re-emitted Horizon event for an already-delivered
-        // (drawId, url) must not re-POST to a URL that previously succeeded.
-        if (store.isDelivered(payload.data.drawId, url)) {
-            console.log(
-                `[DrawWebhook] Skipping already-delivered draw ${payload.data.drawId} for a subscriber`
-            );
-            return { url, success: true, attempt: 0 };
-        }
-
         try {
             const { result, attempts } = await retryWithBackoff(
                 () => deliverWebhook(url, payload, signature, activeConfig!.timeoutMs),
@@ -371,15 +294,6 @@ export async function sendDrawConfirmationWebhook(
                 activeConfig!.initialBackoffMs,
                 activeConfig!.backoffMultiplier
             );
-
-            store.record({
-                drawId: payload.data.drawId,
-                url,
-                status: result.success ? "delivered" : "failed",
-                attempts,
-                lastError: result.error,
-                deliveredAt: result.success ? new Date().toISOString() : undefined
-            });
 
             return {
                 url,
@@ -389,25 +303,12 @@ export async function sendDrawConfirmationWebhook(
                 error: result.error
             };
         } catch (error) {
-            const attempts = activeConfig!.maxRetries + 1;
-            const lastError = error instanceof Error ? error.message : "Unknown error";
-
-            // Exhausted all retries — dead-letter instead of silently dropping.
-            store.record({
-                drawId: payload.data.drawId,
+            return {
                 url,
-                status: "dead_letter",
-                attempts,
-                lastError
-            });
-            log.warn("webhook:delivery:dead-letter", {
-                drawId: payload.data.drawId,
-                url,
-                attempts,
-                lastError,
-            });
-
-            return { url, success: false, attempt: attempts, error: lastError };
+                success: false,
+                attempt: activeConfig!.maxRetries + 1,
+                error: error instanceof Error ? error.message : "Unknown error"
+            };
         }
     });
 
@@ -415,11 +316,10 @@ export async function sendDrawConfirmationWebhook(
     
     const successCount = results.filter(r => r.success).length;
     const failureCount = results.length - successCount;
-
-    log.info("webhook:delivery:complete", {
-        successful: successCount,
-        failed: failureCount,
-    });
+    
+    console.log(
+        `[DrawWebhook] Delivery complete: ${successCount} successful, ${failureCount} failed`
+    );
 
     return results;
 }

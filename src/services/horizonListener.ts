@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createServiceLogger, type ServiceLogContext } from "../utils/serviceLogger.js";
+import { redactLogArgs } from "../utils/logRedact.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,30 +108,16 @@ const retryState = {
     nextRetryTime: 0,
 };
 
-const log = createServiceLogger("HorizonListener");
-
-function toLogContext(value: unknown): ServiceLogContext | undefined {
-    if (value === undefined) {
-        return undefined;
-    }
-
-    if (value !== null && typeof value === "object" && !(value instanceof Error) && !Array.isArray(value)) {
-        return value as ServiceLogContext;
-    }
-
-    return { value };
+function logInfo(...args: unknown[]): void {
+    console.log(...redactLogArgs(args));
 }
 
-function logInfo(message: string, context?: unknown): void {
-    log.info(message, toLogContext(context));
+function logWarn(...args: unknown[]): void {
+    console.warn(...redactLogArgs(args));
 }
 
-function logWarn(message: string, context?: unknown): void {
-    log.warn(message, toLogContext(context));
-}
-
-function logError(message: string, context?: unknown): void {
-    log.error(message, toLogContext(context));
+function logError(...args: unknown[]): void {
+    console.error(...redactLogArgs(args));
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +295,7 @@ function markEventProcessed(eventId: string): void {
 function logMetrics(config: HorizonListenerConfig): void {
     if (!config.enableMetrics) return;
     
-    logInfo("horizon:metrics", {
+    logInfo("[HorizonListener] Metrics:", {
         ...metrics,
         processedEventIdsCount: processedEventIds.size,
         currentLedgerCursor,
@@ -325,7 +311,7 @@ async function dispatchEvent(event: HorizonEvent): Promise<void> {
     if (isEventProcessed(eventId)) {
         metrics.eventsDuplicated++;
         if (activeConfig?.enableMetrics) {
-            logInfo("horizon:event:duplicate", { eventId });
+            logInfo("[HorizonListener] Skipping duplicate event:", eventId);
         }
         return;
     }
@@ -337,7 +323,10 @@ async function dispatchEvent(event: HorizonEvent): Promise<void> {
         try {
             await handler(event);
         } catch (err) {
-            logError("horizon:event-handler:failed", err);
+            logError(
+                "[HorizonListener] Event handler threw an error:",
+                err,
+            );
         }
     }
 }
@@ -453,7 +442,7 @@ async function handleCursorGap(config: HorizonListenerConfig, gapStart: string):
     const maxGap = config.maxCursorGap || 100;
     const startLedger = parseInt(gapStart);
     
-    logInfo("horizon:cursor-gap:detected", { ledger: gapStart });
+    logInfo(`[HorizonListener] Cursor gap detected at ledger ${gapStart}, attempting recovery`);
     
     // Try to fill the gap by querying individual ledgers
     for (let ledger = startLedger; ledger < startLedger + maxGap && ledger <= (currentLedgerCursor || startLedger) + maxGap; ledger++) {
@@ -462,13 +451,13 @@ async function handleCursorGap(config: HorizonListenerConfig, gapStart: string):
             await new Promise(resolve => setTimeout(resolve, 10)); // Simulate network delay
             
             if (Math.random() < 0.1) { // 10% chance of finding events in gap
-                logInfo("horizon:cursor-gap:recovered", { ledger });
+                logInfo(`[HorizonListener] Recovered events at ledger ${ledger}`);
                 metrics.cursorGapsRecovered++;
                 break;
             }
         } catch (error) {
             // If we can't recover from gap, skip ahead
-            logWarn("horizon:cursor-gap:recovery-failed", { ledger, error });
+            logWarn(`[HorizonListener] Failed to recover ledger ${ledger}, skipping`);
             break;
         }
     }
@@ -489,9 +478,7 @@ export async function pollOnce(config: HorizonListenerConfig): Promise<void> {
         // Check if we're in a backoff period
         if (retryState.nextRetryTime > Date.now()) {
             if (config.enableMetrics) {
-                logInfo("horizon:backoff:waiting", {
-                    nextRetryAt: new Date(retryState.nextRetryTime).toISOString(),
-                });
+                logInfo(`[HorizonListener] In backoff period, next retry at ${new Date(retryState.nextRetryTime).toISOString()}`);
             }
             return;
         }
@@ -505,12 +492,11 @@ export async function pollOnce(config: HorizonListenerConfig): Promise<void> {
         
         const cursor = currentLedgerCursor ? `${currentLedgerCursor}` : config.startLedger;
         
-        logInfo("horizon:poll:start", {
-            horizonUrl: config.horizonUrl,
-            contractIds: config.contractIds,
-            contractCount: config.contractIds.length,
-            cursor,
-        });
+        logInfo(
+            `[HorizonListener] Polling ${config.horizonUrl} ` +
+            `(contracts: ${config.contractIds.length > 0 ? config.contractIds.join(", ") : "none"}, ` +
+            `cursor: ${cursor})`,
+        );
         
         const { events } = await fetchHorizonEvents(config, cursor);
         
@@ -531,7 +517,7 @@ export async function pollOnce(config: HorizonListenerConfig): Promise<void> {
             const rateLimitDelay = config.rateLimitDelayMs || 60000;
             retryState.nextRetryTime = Date.now() + rateLimitDelay;
             
-            logWarn("horizon:rate-limit", { rateLimitDelayMs: rateLimitDelay });
+            logWarn(`[HorizonListener] Rate limit hit, waiting ${rateLimitDelay}ms`);
             return;
         }
         
@@ -551,22 +537,17 @@ export async function pollOnce(config: HorizonListenerConfig): Promise<void> {
                 
                 metrics.retryAttempts++;
                 
-                logWarn("horizon:transient-error", {
-                    attempt: retryState.attempts,
-                    maxRetries,
-                    retryInMs: delay,
-                    error: classifiedError,
-                });
+                logWarn(`[HorizonListener] Transient error (attempt ${retryState.attempts}/${maxRetries}), retrying in ${delay}ms:`, classifiedError.message);
                 return;
             } else {
-                logError("horizon:transient-error:max-retries-exceeded", classifiedError);
+                logError(`[HorizonListener] Max retries exceeded for transient error:`, classifiedError);
                 retryState.attempts = 0; // Reset for next time
                 return;
             }
         }
         
         // Non-transient error - log and continue
-        logError("horizon:non-transient-error", classifiedError);
+        logError("[HorizonListener] Non-transient error occurred:", classifiedError);
     }
 }
 

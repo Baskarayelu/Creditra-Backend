@@ -1,64 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-const serviceLoggerMock = vi.hoisted(() => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-}));
-
-vi.mock("../../utils/serviceLogger.js", () => ({
-    createServiceLogger: () => serviceLoggerMock,
-}));
-
 import { 
     initializeWebhooks, 
     sendDrawConfirmationWebhook, 
     testWebhookConnectivity,
     getWebhookConfig,
     resolveWebhookConfig,
-    _resetRuntimeWebhookSubscriptions,
 } from "../drawWebhookService.js";
-import {
-    setWebhookDeliveryStateStore,
-    type WebhookDeliveryStateStore,
-    type DeliveryRecord,
-} from "../webhookDeliveryState.js";
 import type { HorizonEvent } from "../horizonListener.js";
-import { setWebhookDeliveryStateStore } from "../webhookDeliveryState.js";
-import type { WebhookDeliveryStateStore } from "../webhookDeliveryState.js";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-/** Fresh in-memory store so delivered (drawId, url) pairs do not leak across tests. */
-function createTestDeliveryStore(): WebhookDeliveryStateStore {
-    const records = new Map<string, { status: string }>();
-    const key = (drawId: string, url: string) => `${drawId}::${url}`;
-    return {
-        isDelivered(drawId, url) {
-            return records.get(key(drawId, url))?.status === "delivered";
-        },
-        record(record) {
-            records.set(key(record.drawId, record.url), { status: record.status });
-        },
-        deadLetters: () => [],
-        counts: () => ({ total: 0, delivered: 0, failed: 0, deadLetter: 0 }),
-    };
-}
+// Mock console methods to avoid noise in tests
+const mockConsoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+const mockConsoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+const mockConsoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
 
 describe("DrawWebhookService", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mockFetch.mockReset();
-        serviceLoggerMock.info.mockReset();
-        serviceLoggerMock.warn.mockReset();
-        serviceLoggerMock.error.mockReset();
-        setWebhookDeliveryStateStore(createTestDeliveryStore());
         vi.useFakeTimers();
-        _resetRuntimeWebhookSubscriptions();
-        // Fresh delivery-state store so (drawId, url) dedup does not leak across tests.
-        setWebhookDeliveryStateStore(freshDeliveryStore());
         
         // Clear environment variables
         delete process.env.WEBHOOK_URLS;
@@ -164,8 +126,8 @@ describe("DrawWebhookService", () => {
 
             initializeWebhooks();
 
-            expect(serviceLoggerMock.info).toHaveBeenCalledWith(
-                "webhook:initialized",
+            expect(mockConsoleLog).toHaveBeenCalledWith(
+                "[DrawWebhook] Initialized with config:",
                 expect.objectContaining({
                     urls: 2,
                     maxRetries: 3,
@@ -333,11 +295,7 @@ describe("DrawWebhookService", () => {
             });
 
             expect(mockFetch).toHaveBeenCalledTimes(3);
-            expect(serviceLoggerMock.warn).toHaveBeenCalledTimes(2);
-            expect(serviceLoggerMock.warn).toHaveBeenCalledWith(
-                "webhook:delivery:retry",
-                expect.objectContaining({ attempt: 1 }),
-            );
+            expect(mockConsoleWarn).toHaveBeenCalledTimes(2);
         });
 
         it("should handle malformed event data gracefully", async () => {
@@ -352,9 +310,9 @@ describe("DrawWebhookService", () => {
             const results = await sendDrawConfirmationWebhook(event);
 
             expect(results).toEqual([]);
-            expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-                "webhook:event-parse:failed",
-                expect.objectContaining({ error: expect.any(Error) }),
+            expect(mockConsoleError).toHaveBeenCalledWith(
+                "[DrawWebhook] Failed to parse event data:",
+                expect.any(Error)
             );
         });
 
@@ -439,7 +397,7 @@ describe("DrawWebhookService", () => {
             expect(results[0]).toEqual({
                 url: "https://example.com/webhook",
                 reachable: false,
-                error: "HTTP request failed: Connection refused"
+                error: "Connection refused"
             });
         });
 
@@ -481,10 +439,7 @@ describe("DrawWebhookService", () => {
             await sendDrawConfirmationWebhook(event);
             const firstCallSignature = mockFetch.mock.calls[0][1].headers["X-Webhook-Signature"];
 
-            // Reset delivery store so the second send actually POSTs again.
-            setWebhookDeliveryStateStore(createTestDeliveryStore());
             mockFetch.mockClear();
-            setWebhookDeliveryStateStore(freshDeliveryStore());
             await sendDrawConfirmationWebhook(event);
             const secondCallSignature = mockFetch.mock.calls[0][1].headers["X-Webhook-Signature"];
 
@@ -502,13 +457,7 @@ describe("DrawWebhookService", () => {
             initializeWebhooks();
 
             // Mock fetch that never resolves
-            mockFetch.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
-                init.signal.addEventListener("abort", () => {
-                    reject(Object.assign(new Error("The operation was aborted"), {
-                        name: "AbortError",
-                    }));
-                });
-            }));
+            mockFetch.mockImplementation(() => new Promise(() => {}));
 
             const event: HorizonEvent = {
                 ledger: 1000,
@@ -535,7 +484,7 @@ describe("DrawWebhookService", () => {
                 url: "https://example.com/webhook",
                 success: false,
                 attempt: 1,
-                error: "HTTP read timeout after 1000ms: https://example.com/webhook"
+                error: "Request timeout"
             });
         });
     });

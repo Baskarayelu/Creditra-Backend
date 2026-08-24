@@ -17,11 +17,9 @@
  * container.
  */
 import { randomUUID } from 'node:crypto';
-import { ConflictError } from '../errors/index.js';
 import { creditLines, type CreditLineStatus as StoredCreditLineStatus } from '../models/creditLineStore.js';
 import { TransactionType } from '../models/Transaction.js';
 import type { DrawBody, RepayBody } from '../schemas/index.js';
-import { paginateArray, type CursorPage } from '../utils/cursorPagination.js';
 
 export { TransactionType };
 
@@ -117,20 +115,14 @@ export interface PaginatedTransactions {
 /**
  * Thrown when a state-changing action is rejected because the credit line is
  * not in a status that allows the transition (e.g. closing an already-closed
- * line). Mapped to HTTP `409 Conflict` (problem+json) by the error handler
- * and `routes/credit.ts`.
+ * line). Mapped to HTTP `409 Conflict` by `routes/credit.ts`.
  */
-export class InvalidTransitionError extends ConflictError {
+export class InvalidTransitionError extends Error {
   constructor(
     public readonly currentStatus: CreditLineStatus,
     public readonly requestedAction: string,
   ) {
-    super({
-      message: `Cannot "${requestedAction}" a credit line that is already "${currentStatus}".`,
-      code: 'invalid_state_transition',
-      resource: 'credit_line',
-      details: { currentStatus, requestedAction },
-    });
+    super(`Cannot "${requestedAction}" a credit line that is already "${currentStatus}".`);
     this.name = 'InvalidTransitionError';
   }
 }
@@ -143,34 +135,6 @@ export class CreditLineNotFoundError extends Error {
   constructor(public readonly id: string) {
     super(`Credit line "${id}" not found.`);
     this.name = 'CreditLineNotFoundError';
-  }
-}
-
-/**
- * Thrown when an optimistic-locking update fails because the stored
- * {@link CreditLine.version} no longer matches the `expectedVersion` the
- * caller read. Indicates a concurrent write won the race; the caller should
- * re-read the credit line and retry with the fresh version. Mapped to HTTP
- * `409 Conflict` (error code `version_conflict`) via problem+json.
- *
- * Note: the resource id is included for the caller that already knows it;
- * wallet addresses and other sensitive identifiers are never included.
- */
-export class VersionConflictError extends ConflictError {
-  constructor(
-    public readonly id: string,
-    public readonly expectedVersion: number,
-    public readonly actualVersion: number,
-  ) {
-    super({
-      message:
-        `Credit line was modified concurrently ` +
-        `(expected version ${expectedVersion}, found ${actualVersion}). Re-read and retry.`,
-      code: 'version_conflict',
-      resource: 'credit_line',
-      details: { expectedVersion, actualVersion },
-    });
-    this.name = 'VersionConflictError';
   }
 }
 
@@ -259,7 +223,11 @@ export function closeCreditLine(id: string): CreditLine {
   return line;
 }
 
-function filterTransactions(id: string, filters: TransactionFilters): Transaction[] {
+export function getTransactions(
+  id: string,
+  filters: TransactionFilters = {},
+  pagination: PaginationOptions = { page: 1, limit: 20 },
+): PaginatedTransactions {
   if (!_store.has(id)) throw new CreditLineNotFoundError(id);
 
   let txs = [...(_transactionStore.get(id) ?? [])];
@@ -276,22 +244,8 @@ function filterTransactions(id: string, filters: TransactionFilters): Transactio
     txs = txs.filter((tx) => new Date(tx.timestamp).getTime() <= to);
   }
 
-  return txs;
-}
-
-export function getTransactions(
-  id: string,
-  filters: TransactionFilters = {},
-  pagination: PaginationOptions = { page: 1, limit: 20 },
-): PaginatedTransactions {
-  const txs = filterTransactions(id, filters);
-
-  // Newest first (legacy page/limit ordering).
-  txs.sort((a, b) => {
-    const ts = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
-    if (ts !== 0) return ts;
-    return a.id.localeCompare(b.id);
-  });
+  txs.reverse();
+  txs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   const total = txs.length;
   const { page, limit } = pagination;
@@ -300,25 +254,6 @@ export function getTransactions(
   const transactions = txs.slice(offset, offset + limit);
 
   return { transactions, total, page, limit, totalPages };
-}
-
-/**
- * Cursor-paginated transaction history (standard model).
- * Sort: `timestamp DESC`, `id ASC` tie-break. Cursors are opaque.
- */
-export function getTransactionsWithCursor(
-  id: string,
-  filters: TransactionFilters = {},
-  options: { cursor?: string; limit?: number } = {},
-): CursorPage<Transaction> {
-  const txs = filterTransactions(id, filters);
-  return paginateArray(txs, {
-    cursor: options.cursor,
-    limit: options.limit,
-    defaultLimit: 20,
-    order: 'desc',
-    getKey: (tx) => ({ t: new Date(tx.timestamp).getTime(), i: tx.id }),
-  });
 }
 
 export interface SorobanClient {

@@ -25,7 +25,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.x, 22.x]
+        node-version: [18.x, 20.x, 22.x]
       fail-fast: false
 
     steps:
@@ -65,9 +65,9 @@ jobs:
           path: coverage/
           retention-days: 7
 
-      - name: Validate OpenAPI spec and route drift
+      - name: Validate OpenAPI spec
         if: matrix.node-version == '20.x'
-        run: npm run validate:openapi
+        run: npm run validate:spec
 
       - name: Check coverage threshold
         if: matrix.node-version == '20.x'

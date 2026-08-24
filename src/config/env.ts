@@ -13,18 +13,6 @@ import { z } from "zod";
 // Schema
 // ---------------------------------------------------------------------------
 
-const redisUrlSchema = z
-  .string()
-  .url("RATE_LIMIT_REDIS_URL must be a valid URL")
-  .refine((value) => {
-    try {
-      const protocol = new URL(value).protocol;
-      return protocol === "redis:" || protocol === "rediss:";
-    } catch {
-      return false;
-    }
-  }, "RATE_LIMIT_REDIS_URL must use redis:// or rediss://");
-
 const envSchema = z.object({
   // ── Required ──────────────────────────────────────────────────────────────
 
@@ -83,28 +71,6 @@ const envSchema = z.object({
 
   /** Admin API key for admin-only endpoints. Optional — 503 when absent. */
   ADMIN_API_KEY: z.string().optional(),
-
-  /** Optional Redis URL for rate-limit counters shared across API replicas. */
-  RATE_LIMIT_REDIS_URL: redisUrlSchema.optional(),
-
-  /** Redis outage policy for rate limiting. Defaults to fail-open. */
-  RATE_LIMIT_REDIS_FAILURE_MODE: z.enum(["open", "closed"]).default("open"),
-
-  /**
-   * Express `trust proxy` setting for reverse-proxy deployments.
-   * Accepts boolean-ish values, hop counts, or Express IP/CIDR presets.
-   * See `src/config/security.ts` and `docs/SECURITY.md`.
-   */
-  TRUST_PROXY: z.string().optional(),
-
-  /** HSTS max-age in seconds (Helmet). Defaults to 180 days when unset. */
-  HSTS_MAX_AGE: z.string().optional(),
-
-  /** When `true`, Helmet HSTS includes the preload directive. */
-  HSTS_PRELOAD: z.string().optional(),
-
-  /** Force `Secure` on future cookies even outside production. */
-  COOKIE_SECURE: z.string().optional(),
 });
 
 // ---------------------------------------------------------------------------

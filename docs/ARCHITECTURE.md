@@ -13,7 +13,7 @@ flowchart TB
     subgraph Edge[Edge / HTTP]
       EXP[Express app<br/>src/index.ts]
       CORS[CORS allowlist<br/>src/config/cors.ts]
-      BODY[JSON body parser<br/>per-endpoint limits]
+      BODY[JSON body parser<br/>limit 100kb]
       CT[Content-Type guard<br/>415 on non-JSON]
     end
 
@@ -40,7 +40,7 @@ flowchart TB
       RCW[ReconciliationWorker]
       DWS[drawWebhookService]
       HL[horizonListener]
-      SOR[StellarSorobanClient]
+      SOR[sorobanRpcClient]
       JQ[jobQueue]
       RP[RiskProvider factory<br/>rules · static · external]
     end
@@ -95,7 +95,6 @@ flowchart TB
 
 - **Bootstrap** ([`src/index.ts`](../src/index.ts)) constructs the Express app, registers CORS, body parser, content-type guard, request logger, route mounts, and the global error handler — in that order.
 - **DI Container** ([`src/container/Container.ts`](../src/container/Container.ts)) is a lazy singleton. On first `getInstance()` it selects a repository implementation based on `DATABASE_URL` + `NODE_ENV`, constructs the service layer, instantiates the Soroban client and reconciliation pipeline, and registers the default in-process `jobQueue`.
-- **Transaction boundaries** for multi-write credit mutations (`create` / `draw` / `repay`) live in the service layer via `TransactionRunner` (`src/db/transaction.ts`). See [transactions.md](./transactions.md) for the strategy, guarantees, and failure-injection tests.
 - **Graceful shutdown** is bounded by `SHUTDOWN_TIMEOUT_MS` (default 30 s) and stops in this order: HTTP server → reconciliation worker → job queue → DB pool.
 
 ---
@@ -108,7 +107,7 @@ sequenceDiagram
     participant Client
     participant Express
     participant CORS
-    participant BodyParser as bodyLimit + express.json
+    participant BodyParser as express.json (100kb)
     participant CTGuard as Content-Type guard
     participant ReqLog as requestLogger
     participant Auth as auth / adminAuth
@@ -129,7 +128,7 @@ sequenceDiagram
     ReqLog->>Auth: x-api-key timingSafeEqual
     Auth-->>Client: 401 missing / 403 invalid
     Auth->>Rate: ok
-    Rate->>Rate: token bucket; emit X-RateLimit-*
+    Rate->>Rate: window bucket; emit X-RateLimit-*
     Rate-->>Client: 429 + Retry-After
     Rate->>Validate: ok
     Validate->>Validate: Zod safeParse → 400 + field details
@@ -149,7 +148,7 @@ Cross-cutting guarantees:
 
 - **One envelope.** Successful responses use `ok(res, data, status?)`; failures use `fail(res, error, status?)` ([`src/utils/response.ts`](../src/utils/response.ts)).
 - **One request id.** `requestLogger` reuses `x-request-id` from the client when present, otherwise generates a UUID, and echoes it back as a response header.
-- **Body limits.** Per-endpoint caps via `createPathAwareBodyLimitMiddleware` (default 100 KiB, bulk 1 MiB) plus `express.json` absolute ceiling and a `Content-Type` guard for `POST/PUT/PATCH`. See [`docs/body-limits.md`](./body-limits.md).
+- **Body limits.** `express.json({ limit: '100kb' })` and a `Content-Type` guard for `POST/PUT/PATCH`.
 
 ---
 
@@ -245,11 +244,10 @@ The container selects an implementation based on `DATABASE_URL && NODE_ENV !== '
 
 Implemented in [`src/middleware/rateLimit.ts`](../src/middleware/rateLimit.ts):
 
-- True token bucket: capacity `maxRequests`, continuous refill over `windowMs` (`RATE_LIMIT_*` env vars). Per-route defaults for general routes vs `/api/risk/evaluate`.
-- Admin/service bypass via `createAdminBypassChecker()` (`X-Admin-Api-Key` + `ADMIN_API_KEY`) — sets `X-RateLimit-Bypass: admin` and does not charge tokens.
-- Two key generators: `createIpKeyGenerator()` (proxy-aware IP) and `createApiKeyKeyGenerator()` (falls back to IP when no API key present).
-- Emits `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`. On exhaustion emits `Retry-After` and `429`.
-- Pluggable store: in-process `Map` by default; optional Redis store (`RATE_LIMIT_REDIS_URL`) for multi-replica deployments.
+- Token bucket per window: `windowMs` and `maxRequests` from `RATE_LIMIT_*` env vars.
+- Two key generators ship in the codebase: `createIpKeyGenerator()` and `createApiKeyKeyGenerator()` (falls back to IP when no API key present).
+- Emits standard headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`. On exhaustion emits `Retry-After` and `429`.
+- Store is in-process; for multi-replica deployments a Redis adapter is the natural drop-in.
 
 ### Idempotency
 
@@ -315,7 +313,7 @@ Read endpoints are public by design but rate-limited.
 | 403 | Auth header present but invalid |
 | 404 | Resource not found |
 | 409 | Invalid state transition (e.g. closing an already-closed line) |
-| 413 | Body exceeds per-endpoint limit |
+| 413 | Body > 100 kB |
 | 415 | Mutating request without `application/json` Content-Type |
 | 429 | Rate limit exhausted; `Retry-After` included |
 | 500 | Unhandled error — envelope keeps stack out |

@@ -3,15 +3,9 @@
 Human-readable companion to the machine-readable spec at [`src/openapi.yaml`](../src/openapi.yaml) (served live at `/docs` and `/docs.json`). When in doubt, the YAML is authoritative.
 
 - **Base URL (dev):** `http://localhost:3000`
-- **API prefix (canonical):** `/api/v1/*` — see [`api-versioning.md`](./api-versioning.md)
 - **Default media type:** `application/json` (the server returns `415` if you `POST/PUT/PATCH` anything else)
-- **Success envelope:** `{ "data": <payload> | null, "error": null }`
-- **Error media type:** `application/problem+json` (RFC 7807) with stable `type` + `code` — see [`docs/error-envelope.md`](./error-envelope.md)
+- **Response envelope:** `{ "data": <payload> | null, "error": <string> | null }`
 - **Body limit:** 100 kB (oversize returns `413`)
-- **Version header:** `X-API-Version: 1` on all `/api/v1/*` and legacy `/api/*` responses
-
-Unversioned `/api/*` paths remain available during the transition window and
-include `Deprecation`, `Sunset`, and `Link: rel="successor-version"` headers.
 
 ---
 
@@ -22,7 +16,7 @@ Two perpendicular headers:
 | Header | Used by | Backed by |
 |---|---|---|
 | `X-API-Key` | Risk admin, reconciliation admin | [`src/middleware/auth.ts`](../src/middleware/auth.ts) |
-| `X-Admin-Api-Key` | Credit-line `suspend` / `close`, **support tools** | [`src/middleware/adminAuth.ts`](../src/middleware/adminAuth.ts) |
+| `X-Admin-Api-Key` | Credit-line `suspend` / `close` | [`src/middleware/adminAuth.ts`](../src/middleware/adminAuth.ts) |
 
 - API keys are compared in constant time via `crypto.timingSafeEqual`.
 - Missing → `401`, present-but-wrong → `403`.
@@ -32,37 +26,30 @@ Read endpoints are public-by-design but rate-limited.
 
 ---
 
-## 2. Error envelope (problem+json)
+## 2. Error envelope
 
-Every error response (`4xx`, `5xx`) uses **RFC 7807** `application/problem+json`
-with a stable taxonomy. Legacy `data` / `error` fields remain for older clients.
+Every error response (`4xx`, `5xx`) has this shape:
 
 ```json
 {
-  "type": "https://docs.creditra.dev/problems/validation_failed",
-  "title": "Validation Error",
-  "status": 400,
-  "detail": "Validation failed",
-  "code": "validation_failed",
-  "details": [
-    { "field": "walletAddress", "message": "Invalid Stellar address" }
-  ],
   "data": null,
-  "error": "Validation failed"
+  "error": "<human readable summary>"
 }
 ```
 
-| Category | Codes |
-|---|---|
-| Validation | `validation_failed` |
-| Auth | `unauthorized`, `forbidden` |
-| Not found | `not_found` |
-| Conflict | `duplicate_resource`, `version_conflict`, `invalid_state_transition`, `unique_constraint_violation` |
-| Rate limited | `rate_limited` (+ `retryAfter` / `Retry-After`) |
-| Upstream | `upstream_failure`, `upstream_timeout` |
-| Other | `payload_too_large`, `unsupported_media_type`, `service_unavailable`, `internal_error` |
+Validation errors additionally include `details`:
 
-See [`docs/error-envelope.md`](./error-envelope.md) for the full contract and helpers.
+```json
+{
+  "data": null,
+  "error": "Validation failed",
+  "details": [
+    { "field": "walletAddress", "message": "Invalid Stellar address" }
+  ]
+}
+```
+
+Rate-limit responses additionally include `retryAfter` and the `Retry-After` HTTP header. See [`docs/error-envelope.md`](./error-envelope.md) for the helper API.
 
 ### Status code semantics
 
@@ -72,12 +59,11 @@ See [`docs/error-envelope.md`](./error-envelope.md) for the full contract and he
 | 201 | Resource created |
 | 202 | Asynchronous accept (e.g. reconciliation trigger) |
 | 204 | Successful delete |
-| 304 | Not Modified — conditional GET matched `If-None-Match` (see [etag-caching.md](./etag-caching.md)) |
 | 400 | Schema validation failed |
 | 401 | Auth header missing |
 | 403 | Auth header present but invalid |
 | 404 | Resource not found |
-| 409 | Conflict: invalid state transition, optimistic-lock version mismatch, or duplicate resource (problem+json; see [`error-envelope.md`](./error-envelope.md)) |
+| 409 | Invalid state transition (e.g. close-of-closed) |
 | 413 | Body > 100 kB |
 | 415 | Mutating request lacked `application/json` |
 | 429 | Rate limit exhausted |
@@ -88,32 +74,9 @@ See [`docs/error-envelope.md`](./error-envelope.md) for the full contract and he
 
 ## 3. Pagination & filtering conventions
 
-### Cursor (standard — preferred for all list endpoints)
+Two pagination styles ship — pick the one the endpoint advertises in its query schema.
 
-Presence of the `cursor` query param (even empty) selects cursor mode.
-
-| Param | Type | Default | Bounds |
-|---|---|---|---|
-| `cursor` | string | — | opaque |
-| `limit` | int | 25 (varies by endpoint) | 1–100 |
-
-Response pagination block:
-
-```json
-{ "limit": 25, "nextCursor": "<opaque>|null", "hasMore": true }
-```
-
-Applied to:
-
-- `GET /api/credit/lines`
-- `GET /api/credit/lines/:id/transactions`
-- `GET /api/admin/api-keys` and `GET /api/admin/api-keys/audit`
-- `GET /api/webhooks/deliveries`
-
-Cursors are opaque base64url payloads; clients must pass `nextCursor` back
-verbatim. Full details: [`docs/cursor-pagination.md`](./cursor-pagination.md).
-
-### Offset / page (legacy, still supported)
+### Offset/limit (default for risk history, transactions)
 
 | Param | Type | Default | Bounds |
 |---|---|---|---|
@@ -121,8 +84,9 @@ verbatim. Full details: [`docs/cursor-pagination.md`](./cursor-pagination.md).
 | `limit` | int | 20 | 1–100 |
 | `page` *(transactions only)* | int | 1 | ≥ 1 |
 
-Used when `cursor` is **omitted** on credit-line list, transaction history, and
-risk history.
+### Cursor (credit-line list)
+
+`CreditLineService.getAllCreditLinesWithCursor(cursor?, limit?)` returns `{ items, nextCursor }`. Cursor is an opaque string; clients should pass it back verbatim. See [`docs/cursor-pagination.md`](./cursor-pagination.md).
 
 ### Filtering — transactions
 
@@ -130,17 +94,7 @@ risk history.
 
 - `type` ∈ `borrow | repay | interest_accrual | fee | status_change`
 - `from`, `to` — ISO-8601 date strings (`new Date(from).getTime()` must be valid)
-- `cursor`, `limit` (standard) **or** `page`, `limit` (legacy)
-
-### Conditional GET (ETag)
-
-Read-heavy endpoints emit an `ETag` and honour `If-None-Match` with `304 Not Modified`:
-
-- `GET /api/credit/lines/:id`
-- `GET /api/credit/lines/:id/transactions`
-- `GET /api/dashboard/summary`
-
-Responses include `Cache-Control: private, must-revalidate`. Full semantics, client examples, and security notes live in [`docs/etag-caching.md`](./etag-caching.md).
+- `page`, `limit`
 
 ---
 
@@ -201,7 +155,7 @@ List all credit lines (in-memory store list).
   ```
 - **Validation:** wallet must satisfy `^G[A-Z2-7]{55}$`. Either `creditLimit` or `requestedLimit` is required.
 - **Response 201:** newly created `CreditLine`.
-- **Errors:** `400` on validation / domain error message; `409` problem+json (`duplicate_resource`) when an open credit line already exists for the wallet.
+- **Errors:** `400` on validation, `400` on domain error message.
 
 #### `PUT /api/credit/lines/:id`
 
@@ -222,7 +176,7 @@ Patches `creditLimit`, `interestRateBps`, or `status`.
 
 Filterable transaction history.
 
-- **Query:** `type`, `from`, `to`, plus `cursor`/`limit` (standard) or `page`/`limit` (legacy). See �3.
+- **Query:** `type`, `from`, `to`, `page`, `limit` (see §3).
 - **Errors:** `400` for any bad filter; `404` if line not found.
 
 #### `POST /api/credit/lines/:id/draw`
@@ -273,22 +227,6 @@ Implemented in [`src/routes/risk.ts`](../src/routes/risk.ts), backed by `RiskEva
 - **Query:** `offset`, `limit` (validated by `riskHistoryQuerySchema`).
 - **Response 200:** `{ data: { evaluations: RiskEvaluation[] }, error: null }`.
 
-#### `GET /api/risk/admin/signals` *(API-key auth)*
-
-List anomaly risk signals (rapid draws, draw bursts, unusual repay patterns)
-for operator review. Signals are advisory only — see
-[`ANOMALY_DETECTION.md`](./ANOMALY_DETECTION.md) for rules and thresholds.
-
-- **Auth:** `X-API-Key`.
-- **Query** (`riskSignalsQuerySchema`, all optional): `walletAddress`,
-  `creditLineId`, `signalType`, `status`, `correlationId`, `offset`, `limit`.
-- **Response 200:** `{ data: { signals, total, offset, limit }, error: null }`.
-
-#### `GET /api/risk/admin/signals/:id` *(API-key auth)*
-
-- **Auth:** `X-API-Key`.
-- **404:** `Risk signal not found`.
-
 #### `POST /api/risk/admin/recalibrate` *(API-key auth)*
 
 Hook for triggering a recalibration of the risk model.
@@ -305,31 +243,11 @@ Implemented in [`src/routes/webhook.ts`](../src/routes/webhook.ts). These descri
 
 Returns subscriber URLs, retry/backoff settings, and timeout — never the secret.
 
-Subscriber implementation details, HMAC verification code, timestamp checks,
-and idempotency guidance are documented in
-[`webhook-subscribers.md`](./webhook-subscribers.md).
-
 #### `POST /api/webhooks/test`
 
 Reachability probe for every configured URL. Returns `{ total, reachable, unreachable, results[] }`.
 
 #### `GET /api/webhooks/health`
-
-#### `GET /api/webhooks/subscriptions` *(API-key auth)*
-
-Returns active outbound webhook subscriber metadata without secret material.
-
-#### `GET /api/webhooks/deliveries` *(API-key auth)*
-
-Returns recent durable delivery rows. Optional query parameters:
-
-- `status`: `queued`, `delivered`, `failed`, or `dead_letter`
-- `limit`: 1-200
-
-#### `POST /api/webhooks/deliveries/:id/replay` *(API-key auth)*
-
-Requeues a stored delivery for asynchronous retry and returns `202` with the
-new job id.
 
 `active | disabled` — disabled when no URLs are configured.
 
@@ -340,7 +258,7 @@ new job id.
 ```http
 Content-Type: application/json
 X-Webhook-Signature: sha256=<hex HMAC>
-X-Webhook-Timestamp: <payload ISO timestamp>
+X-Webhook-Timestamp: <epoch ms>
 User-Agent: Creditra-Webhook/1.0
 ```
 
@@ -363,24 +281,10 @@ User-Agent: Creditra-Webhook/1.0
 HMAC is computed over the **raw JSON body** with `WEBHOOK_SECRET`. Subscribers must:
 
 1. Re-compute `HMAC-SHA256(body, secret)` and compare in constant time.
-2. Reject when `X-Webhook-Timestamp` falls outside your tolerance window.
+2. Reject when `now - X-Webhook-Timestamp` exceeds your tolerance window.
 3. Deduplicate by `data.drawId`.
 
-Webhook delivery settings expose retry and backoff knobs. Implement idempotency on receive so repeated deliveries are safe.
-
-### Inbound partner webhooks
-
-Implemented in [`src/routes/inboundWebhooks.ts`](../src/routes/inboundWebhooks.ts).
-
-#### `POST /api/inbound-webhooks/events`
-
-- **Auth:** HMAC headers only (`X-Signature`, `X-Timestamp`, `X-Nonce`). No API key.
-- **Secret:** `INBOUND_WEBHOOK_SECRET` (503 when unset).
-- **Signed payload:** `X-Timestamp + "." + X-Nonce + "." + raw_body`.
-- **Replay:** nonce TTL cache; duplicate nonces → `401 Replay detected`.
-- **Response 202:** `{ data: { accepted: true, event }, error: null }`.
-
-Partner signing guide: [`docs/webhooks.md`](./webhooks.md).
+Server retries up to `WEBHOOK_MAX_RETRIES + 1` times with exponential backoff — implement idempotency on receive.
 
 ---
 
@@ -398,31 +302,18 @@ Implemented in [`src/routes/reconciliation.ts`](../src/routes/reconciliation.ts)
 - **Auth:** `X-API-Key`.
 - **Response 200:** `{ data: { workerRunning, queueSize, failedJobs }, error: null }`.
 
-### 4.x Compliance exports (admin)
-
-See [`COMPLIANCE_EXPORTS.md`](./COMPLIANCE_EXPORTS.md) for full detail. Summary:
-
-| Method | Path | Auth |
-|--------|------|------|
-| `GET` | `/api/admin/exports/credit-lines` | `X-Admin-Api-Key` |
-| `GET` | `/api/admin/exports/transactions` | `X-Admin-Api-Key` |
-| `GET` | `/api/admin/exports/audit` | `X-Admin-Api-Key` |
-
-Required query: `from`, `to` (max 90-day span). Optional: `format=json|csv`, `limit` (max 5000), `offset`, plus resource filters. Responses stream JSON envelopes or CSV attachments.
-
 ---
 
-## 5. Rate-limit headers (token bucket)
+## 5. Rate-limit headers (every response)
 
 ```
 X-RateLimit-Limit: 100
 X-RateLimit-Remaining: 87
-X-RateLimit-Reset: 1718243400      # epoch seconds when the bucket is next full
-X-RateLimit-Bypass: admin          # only when X-Admin-Api-Key bypass applied
-Retry-After: 12                    # only on 429 — seconds until ≥1 token
+X-RateLimit-Reset: 1718243400      # epoch seconds
+Retry-After: 12                    # only on 429
 ```
 
-Defaults: `RATE_LIMIT_WINDOW_MS=60000`, `RATE_LIMIT_MAX_REQUESTS=100`, `RATE_LIMIT_MAX_EVALUATE=10` (the risk endpoint is more expensive), `RATE_LIMIT_MAX_EXPORT=5` (compliance exports).
+Defaults: `RATE_LIMIT_WINDOW_MS=60000`, `RATE_LIMIT_MAX_REQUESTS=100`, `RATE_LIMIT_MAX_EVALUATE=10` (the risk endpoint is more expensive).
 
 ---
 

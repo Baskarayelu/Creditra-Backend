@@ -77,13 +77,11 @@ describe('InMemoryTransactionRepository', () => {
         amount: '50.00',
         type: TransactionType.REPAY
       });
-      const olderCreatedAt = new Date('2026-01-01T00:00:00.000Z');
-      const newerCreatedAt = new Date('2026-01-01T00:00:01.000Z');
-      const olderTransaction = { ...tx1, createdAt: olderCreatedAt };
-      const newerTransaction = { ...tx2, createdAt: newerCreatedAt };
 
-      repository['transactions'].set(tx1.id, olderTransaction);
-      repository['transactions'].set(tx2.id, newerTransaction);
+      const older = new Date('2026-01-01T00:00:00.000Z');
+      const newer = new Date('2026-01-01T00:00:00.001Z');
+      repository['transactions'].set(tx1.id, { ...tx1, createdAt: older });
+      repository['transactions'].set(tx2.id, { ...tx2, createdAt: newer });
 
       await repository.create({
         creditLineId: 'other-cl',
@@ -94,8 +92,10 @@ describe('InMemoryTransactionRepository', () => {
       const transactions = await repository.findByCreditLineId(creditLineId);
 
       expect(transactions).toHaveLength(2);
-      expect(transactions[0]).toEqual(newerTransaction);
-      expect(transactions[1]).toEqual(olderTransaction);
+      expect(transactions[0].id).toBe(tx2.id); // Most recent first
+      expect(transactions[0].createdAt).toEqual(newer);
+      expect(transactions[1].id).toBe(tx1.id);
+      expect(transactions[1].createdAt).toEqual(older);
     });
 
     it('should support pagination', async () => {

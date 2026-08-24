@@ -15,12 +15,8 @@ This directory holds the long-form documentation for the Creditra backend. The t
 | Document | Subsystem |
 |---|---|
 | [`SIGNALS_INGEST.md`](./SIGNALS_INGEST.md) | The behavioral-signal pipeline — Creditra's differentiator. |
-| [`ANOMALY_DETECTION.md`](./ANOMALY_DETECTION.md) | Rules-based rapid draw/repay anomaly hooks and risk signals. |
 | [`INDEXER.md`](./INDEXER.md) | Stellar Horizon listener, cursor model, gap recovery, reconciliation runbook. |
 | [`SECURITY.md`](./SECURITY.md) | Threat model and in-tree mitigations. |
-| [`DATA_RETENTION.md`](./DATA_RETENTION.md) | Retention windows, anonymization, and deletion tooling for logs, audit events, and wallet-linked data. |
-| [`COMPLIANCE_EXPORTS.md`](./COMPLIANCE_EXPORTS.md) | Admin CSV/JSON export endpoints for audit logs, credit lines, and transactions (access controls + limits). |
-| [`webhook-subscribers.md`](./webhook-subscribers.md) | Subscriber onboarding for outbound draw webhooks, HMAC verification, delivery settings, and idempotency. |
 | [`OBSERVABILITY.md`](./OBSERVABILITY.md) | Structured logging, metrics, health probes, tracing strategy. |
 | [`TESTING.md`](./TESTING.md) | Test pyramid, file counts, coverage gate, run commands. |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Commit conventions, PR / review checklists, migration discipline. |
@@ -31,11 +27,9 @@ This directory holds the long-form documentation for the Creditra backend. The t
 |---|---|
 | [`data-model.md`](./data-model.md) | Per-table column reference. |
 | [`REPOSITORY_ARCHITECTURE.md`](./REPOSITORY_ARCHITECTURE.md) | Repository / DIP layout. |
-| [`transactions.md`](./transactions.md) | DB transaction boundaries for atomic credit mutations (draw / repay / create). |
 | [`schema-validation.md`](./schema-validation.md) | Boot-time schema validator. |
 | [`cursor-pagination.md`](./cursor-pagination.md) | Cursor pagination contract. |
 | [`error-envelope.md`](./error-envelope.md) | `{ data, error }` envelope reference. |
-| [`api-versioning.md`](./api-versioning.md) | `/api/v1/*` mounts, deprecation headers, sunset policy. |
 | [`http-timeouts.md`](./http-timeouts.md) | Outbound HTTP timeout policy. |
 | [`HORIZON_LISTENER_CONFIG.md`](./HORIZON_LISTENER_CONFIG.md) | Env-var reference for the listener. |
 | [`reconciliation.md`](./reconciliation.md) | Reconciliation job details. |

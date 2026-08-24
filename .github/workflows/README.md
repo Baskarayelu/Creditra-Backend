@@ -7,7 +7,7 @@ The `backend-ci.yml` workflow provides comprehensive continuous integration for 
 ## Workflow Features
 
 ### 1. Multi-Node Version Testing
-- Tests against supported Node.js LTS versions: 20.x, 22.x
+- Tests against Node.js LTS versions: 18.x, 20.x, 22.x
 - Ensures compatibility across different Node environments
 - Fail-fast disabled to see results from all versions
 
@@ -28,7 +28,6 @@ The `backend-ci.yml` workflow provides comprehensive continuous integration for 
 - **OpenAPI Spec Validation**: Ensures API documentation is valid YAML
 - **Security Audit**: Runs `npm audit` to check for vulnerable dependencies
 - **Secret Detection**: Scans for hardcoded API keys, private keys, or secrets
-- **Gitleaks Scan**: The separate `secret-scanning.yml` workflow runs the pinned Gitleaks CLI with `.gitleaks.toml`
 
 ### 5. Security Checks
 The workflow includes checks for:
@@ -62,9 +61,6 @@ npm run test:coverage
 
 # Validate OpenAPI spec
 npm run validate:spec
-
-# Scan for committed secrets
-npm run security:secrets
 ```
 
 ## Coverage Requirements
@@ -98,7 +94,6 @@ None required for basic CI. For integration tests with Stellar:
 - Use `process.env` for all secrets
 - Stellar keys should be generated per environment
 - PII must not be in test fixtures
-- Secret scanner allowlists must stay limited to non-deployable placeholders
 
 ## Troubleshooting
 
@@ -126,7 +121,7 @@ Follow conventional commits:
 ```
 ci(backend): add comprehensive test and lint workflow
 
-- Multi-node version matrix (20.x, 22.x)
+- Multi-node version matrix (18.x, 20.x, 22.x)
 - Coverage reporting with 95% threshold
 - Security audit and secret detection
 - OpenAPI spec validation

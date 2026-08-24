@@ -16,7 +16,6 @@ function makeRes() {
     const res: Partial<Response> = {};
     res.status = vi.fn().mockReturnValue(res);
     res.json = vi.fn().mockReturnValue(res);
-    res.setHeader = vi.fn().mockReturnValue(res);
     return res as Response;
 }
 
@@ -65,18 +64,7 @@ describe('requireApiKey middleware', () => {
         requireApiKey(req as Request, res, next);
 
         expect(res.status).toHaveBeenCalledWith(401);
-        expect(res.setHeader).toHaveBeenCalledWith(
-          'Content-Type',
-          'application/problem+json; charset=utf-8',
-        );
-        expect(res.json).toHaveBeenCalledWith(
-          expect.objectContaining({
-            code: 'unauthorized',
-            status: 401,
-            error: 'Unauthorized',
-            data: null,
-          }),
-        );
+        expect(res.json).toHaveBeenCalledWith({ error: 'Unauthorized' });
         expect(next).not.toHaveBeenCalled();
     });
 
@@ -87,14 +75,7 @@ describe('requireApiKey middleware', () => {
         requireApiKey(req as Request, res, next);
 
         expect(res.status).toHaveBeenCalledWith(403);
-        expect(res.json).toHaveBeenCalledWith(
-          expect.objectContaining({
-            code: 'forbidden',
-            status: 403,
-            error: 'Forbidden',
-            data: null,
-          }),
-        );
+        expect(res.json).toHaveBeenCalledWith({ error: 'Forbidden' });
         expect(next).not.toHaveBeenCalled();
     });
 

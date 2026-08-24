@@ -5,35 +5,27 @@ import {
   vi,
   beforeEach,
   afterEach,
+  type MockInstance,
 } from "vitest";
 import {
   InMemoryJobQueue,
   type Job,
 } from "../services/jobQueue.js";
 
-const serviceLoggerMock = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-}));
-
-vi.mock("../utils/serviceLogger.js", () => ({
-  createServiceLogger: () => serviceLoggerMock,
-}));
-
 function createQueue(): InMemoryJobQueue {
   return new InMemoryJobQueue(10, 20);
 }
 
 describe("InMemoryJobQueue", () => {
+  let consoleErrorSpy: MockInstance;
+
   beforeEach(() => {
     vi.useFakeTimers();
-    serviceLoggerMock.info.mockReset();
-    serviceLoggerMock.warn.mockReset();
-    serviceLoggerMock.error.mockReset();
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleErrorSpy.mockRestore();
     vi.useRealTimers();
   });
 
@@ -138,7 +130,7 @@ describe("InMemoryJobQueue", () => {
     expect(failed[0]?.lastError).toBe("kaboom");
   });
 
-  it("surfaces dead-letter jobs to operators via structured logger", async () => {
+  it("surfaces dead-letter jobs to operators via console.error", async () => {
     const queue = createQueue();
     queue.registerHandler("fail-once", async () => {
       throw new Error("oops");
@@ -149,13 +141,8 @@ describe("InMemoryJobQueue", () => {
     await vi.advanceTimersByTimeAsync(100);
     await queue.drain();
 
-    expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-      "job-queue:dead-letter:max-attempts-exhausted",
-      expect.objectContaining({
-        jobType: "fail-once",
-        attempts: 1,
-        lastError: "oops",
-      }),
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("exhausted"),
     );
   });
 
@@ -174,9 +161,8 @@ describe("InMemoryJobQueue", () => {
     expect(queue.getFailedJobs()).toHaveLength(1);
     expect(queue.getFailedJobs()[0]?.type).toBe("no-handler");
     expect(queue.size()).toBe(0);
-    expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-      "job-queue:dead-letter:no-handler",
-      expect.objectContaining({ jobType: "no-handler" }),
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("No handler"),
     );
   });
 

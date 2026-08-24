@@ -1,7 +1,5 @@
-import { type CreditLine, type CreateCreditLineRequest, type UpdateCreditLineRequest, CreditLineStatus } from '../../models/CreditLine.js';
-import type { CreditLineRepository, CursorPaginationResult } from '../interfaces/CreditLineRepository.js';
-import { VersionConflictError } from '../../services/creditService.js';
-import { paginateArray } from '../../utils/cursorPagination.js';
+import{ type CreditLine, type CreateCreditLineRequest, type UpdateCreditLineRequest, CreditLineStatus } from '../../models/CreditLine.js';
+import type{ CreditLineRepository, CursorPaginationResult } from '../interfaces/CreditLineRepository.js';
 import { randomUUID } from 'crypto';
 
 export class InMemoryCreditLineRepository implements CreditLineRepository {
@@ -16,8 +14,6 @@ export class InMemoryCreditLineRepository implements CreditLineRepository {
   }
 
   async create(request: CreateCreditLineRequest): Promise<CreditLine> {
-    // Duplicate open detection lives in CreditLineService so repository
-    // contract tests can still seed multiple rows per wallet when needed.
     const id = randomUUID();
     const now = new Date();
     
@@ -29,7 +25,6 @@ export class InMemoryCreditLineRepository implements CreditLineRepository {
       utilized: '0',
       interestRateBps: request.interestRateBps,
       status: CreditLineStatus.ACTIVE,
-      version: 1,
       createdAt: now,
       updatedAt: now
     };
@@ -52,19 +47,54 @@ export class InMemoryCreditLineRepository implements CreditLineRepository {
     return all.slice(offset, offset + limit);
   }
 
-  async findAllWithCursor(cursor?: string, limit = 100): Promise<CursorPaginationResult<CreditLine>> {
-    // Shared opaque cursor + deterministic (createdAt ASC, id ASC) ordering.
-    const page = paginateArray(Array.from(this.creditLines.values()), {
-      cursor,
-      limit,
-      order: 'asc',
-      defaultLimit: 100,
-      getKey: (cl) => ({ t: cl.createdAt.getTime(), i: cl.id }),
-    });
+  async findAllWithCursor(cursor?: string, limit = 100): Promise<CursorPaginationResult> {
+    // Sort by createdAt and id for stable ordering
+    const all = Array.from(this.creditLines.values())
+      .sort((a, b) => {
+        const timeCompare = a.createdAt.getTime() - b.createdAt.getTime();
+        return timeCompare !== 0 ? timeCompare : a.id.localeCompare(b.id);
+      });
+
+    let startIndex = 0;
+
+    // If cursor is provided, find the starting position
+    if (cursor) {
+      try {
+        const decodedCursor = Buffer.from(cursor, 'base64').toString('utf-8');
+        const [cursorTime, cursorId] = decodedCursor.split('|');
+        
+        startIndex = all.findIndex(cl => {
+          const clTime = cl.createdAt.getTime().toString();
+          return clTime === cursorTime && cl.id === cursorId;
+        });
+
+        // If cursor not found or invalid, start from beginning
+        if (startIndex === -1) {
+          startIndex = 0;
+        } else {
+          // Start from the next item after the cursor
+          startIndex += 1;
+        }
+      } catch {
+        // Invalid cursor format, start from beginning
+        startIndex = 0;
+      }
+    }
+
+    const items = all.slice(startIndex, startIndex + limit);
+    const hasMore = startIndex + limit < all.length;
+
+    let nextCursor: string | null = null;
+    if (hasMore && items.length > 0) {
+      const lastItem = items[items.length - 1];
+      const cursorData = `${lastItem.createdAt.getTime()}|${lastItem.id}`;
+      nextCursor = Buffer.from(cursorData, 'utf-8').toString('base64');
+    }
+
     return {
-      items: page.items,
-      nextCursor: page.nextCursor,
-      hasMore: page.hasMore,
+      items,
+      nextCursor,
+      hasMore
     };
   }
 
@@ -74,20 +104,9 @@ export class InMemoryCreditLineRepository implements CreditLineRepository {
       return null;
     }
 
-    const currentVersion = existing.version ?? 1;
-
-    // Optimistic locking: when the caller supplies the version it read,
-    // reject the write if another update advanced it in the meantime.
-    if (request.expectedVersion !== undefined && request.expectedVersion !== currentVersion) {
-      throw new VersionConflictError(id, request.expectedVersion, currentVersion);
-    }
-
-    const { expectedVersion: _expectedVersion, ...patch } = request;
-
     const updated: CreditLine = {
       ...existing,
-      ...patch,
-      version: currentVersion + 1,
+      ...request,
       updatedAt: new Date()
     };
 

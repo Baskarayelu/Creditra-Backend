@@ -1,23 +1,14 @@
 /**
- * Rate Limiting Configuration (token bucket)
+ * Rate Limiting Configuration
  *
- * Configurable per-route defaults loaded from environment variables.
- * Invalid numeric values fall back to the documented defaults.
+ * Configurable limits loaded from environment variables.
+ * Throws at startup if invalid values are provided.
  *
  * Env vars:
  *   RATE_LIMIT_WINDOW_MS        - Time window in ms (default: 60000)
  *   RATE_LIMIT_MAX_REQUESTS    - Max requests per window for general endpoints (default: 100)
  *   RATE_LIMIT_MAX_EVALUATE    - Max requests per window for /api/risk/evaluate (default: 10)
- *   RATE_LIMIT_MAX_EXPORT      - Max requests per window for /api/admin/exports/* (default: 5)
- *   RATE_LIMIT_REDIS_URL       - Optional Redis URL for shared rate-limit storage
- *   RATE_LIMIT_REDIS_FAILURE_MODE - "open" or "closed" on Redis outage (default: open)
- *
- * Admin / service bypass is controlled by ADMIN_API_KEY + X-Admin-Api-Key
- * (see createAdminBypassChecker in middleware/rateLimit.ts); it is not an
- * env knob on the rate-limit config itself.
  */
-
-import type { RedisRateLimitFailureMode } from "../middleware/rateLimit.js";
 
 export interface RateLimitConfig {
   windowMs: number;
@@ -27,12 +18,6 @@ export interface RateLimitConfig {
 interface RateLimitConfigs {
   default: RateLimitConfig;
   evaluate: RateLimitConfig;
-  export: RateLimitConfig;
-}
-
-export interface RateLimitStoreConfig {
-  redisUrl?: string;
-  redisFailureMode: RedisRateLimitFailureMode;
 }
 
 function parseIntOrDefault(value: string | undefined, defaultValue: number): number {
@@ -40,10 +25,6 @@ function parseIntOrDefault(value: string | undefined, defaultValue: number): num
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
   return parsed;
-}
-
-function parseFailureMode(value: string | undefined): RedisRateLimitFailureMode {
-  return value === "closed" ? "closed" : "open";
 }
 
 export function loadRateLimitConfig(): RateLimitConfigs {
@@ -59,21 +40,9 @@ export function loadRateLimitConfig(): RateLimitConfigs {
     process.env.RATE_LIMIT_MAX_EVALUATE,
     10,
   );
-  const maxExport = parseIntOrDefault(
-    process.env.RATE_LIMIT_MAX_EXPORT,
-    5,
-  );
 
   return {
     default: { windowMs, maxRequests },
     evaluate: { windowMs, maxRequests: maxEvaluate },
-    export: { windowMs, maxRequests: maxExport },
-  };
-}
-
-export function loadRateLimitStoreConfig(): RateLimitStoreConfig {
-  return {
-    redisUrl: process.env.RATE_LIMIT_REDIS_URL,
-    redisFailureMode: parseFailureMode(process.env.RATE_LIMIT_REDIS_FAILURE_MODE),
   };
 }

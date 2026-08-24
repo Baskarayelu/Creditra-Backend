@@ -1,15 +1,3 @@
-import { vi } from "vitest";
-
-const serviceLoggerMock = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-}));
-
-vi.mock("../utils/serviceLogger.js", () => ({
-  createServiceLogger: () => serviceLoggerMock,
-}));
-
 import {
   start,
   stop,
@@ -24,6 +12,7 @@ import {
   type HorizonEvent,
   type HorizonListenerConfig,
 } from "../services/horizonListener.js";
+import { vi, type Mock } from "vitest";
 
 const baseConfig: HorizonListenerConfig = {
   horizonUrl: "https://horizon-testnet.stellar.org",
@@ -35,6 +24,19 @@ const baseConfig: HorizonListenerConfig = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Capture console output without cluttering test output. */
+function silenceConsole() {
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+}
+
+function restoreConsole() {
+  (console.log as unknown as Mock).mockRestore?.();
+  (console.warn as unknown as Mock).mockRestore?.();
+  (console.error as unknown as Mock).mockRestore?.();
+}
 
 /** Save and restore env vars. */
 function withEnv(vars: Record<string, string>, fn: () => void) {
@@ -61,9 +63,7 @@ function withEnv(vars: Record<string, string>, fn: () => void) {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  serviceLoggerMock.info.mockReset();
-  serviceLoggerMock.warn.mockReset();
-  serviceLoggerMock.error.mockReset();
+  silenceConsole();
   // Ensure clean state before every test.
   if (isRunning()) stop();
   clearEventHandlers();
@@ -72,6 +72,7 @@ beforeEach(() => {
 afterEach(() => {
   if (isRunning()) stop();
   clearEventHandlers();
+  restoreConsole();
   vi.useRealTimers();
 });
 
@@ -224,19 +225,18 @@ describe("start()", () => {
   it("is a no-op (warns) if called when already running", async () => {
     vi.useFakeTimers();
     await start();
-    const warnSpy = serviceLoggerMock.warn;
+    const warnSpy = console.warn as unknown as Mock;
     warnSpy.mockClear();
     await start(); // second call
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining("Already running"),
-      undefined,
     );
     expect(isRunning()).toBe(true);
   });
 
   it("logs startup config information", async () => {
     vi.useFakeTimers();
-    const logSpy = serviceLoggerMock.info;
+    const logSpy = console.log as unknown as Mock;
     await start();
     const calls = logSpy.mock.calls.flat().join(" ");
     expect(calls).toContain("Starting with config");
@@ -276,21 +276,20 @@ describe("stop()", () => {
   });
 
   it("is a no-op (warns) if called when not running", () => {
-    const warnSpy = serviceLoggerMock.warn;
+    const warnSpy = console.warn as unknown as Mock;
     stop();
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining("Not running"),
-      undefined,
     );
   });
 
   it("logs a stopped message", async () => {
     vi.useFakeTimers();
     await start();
-    const logSpy = serviceLoggerMock.info;
+    const logSpy = console.log as unknown as Mock;
     logSpy.mockClear();
     stop();
-    expect(serviceLoggerMock.info.mock.calls.flat().join(" ")).toContain(
+    expect((console.log as unknown as Mock).mock.calls.flat().join(" ")).toContain(
       "Stopped",
     );
   });
@@ -368,8 +367,8 @@ describe("onEvent() / clearEventHandlers()", () => {
 
       expect(goodEvents.length).toBe(1);
       expect(
-        serviceLoggerMock.error.mock.calls.flat().join(" "),
-      ).toContain("horizon:event-handler:failed");
+        (console.error as unknown as Mock).mock.calls.flat().join(" "),
+      ).toContain("handler threw an error");
     });
   });
 
@@ -400,13 +399,10 @@ describe("pollOnce()", () => {
   });
 
   it("logs a polling message on every call", async () => {
-    const logSpy = serviceLoggerMock.info;
+    const logSpy = console.log as unknown as Mock;
     logSpy.mockClear();
     await pollOnce(baseConfig);
-    expect(logSpy).toHaveBeenCalledWith(
-      "horizon:poll:start",
-      expect.objectContaining({ horizonUrl: baseConfig.horizonUrl }),
-    );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Polling"));
   });
 
   it("emits a simulated event when contractIds is non-empty", async () => {
@@ -435,13 +431,10 @@ describe("pollOnce()", () => {
   });
 
   it("logs 'none' for contracts when contractIds is empty", async () => {
-    const logSpy = serviceLoggerMock.info;
+    const logSpy = console.log as unknown as Mock;
     logSpy.mockClear();
     await pollOnce(baseConfig);
-    expect(logSpy).toHaveBeenCalledWith(
-      "horizon:poll:start",
-      expect.objectContaining({ contractCount: 0, contractIds: [] }),
-    );
+    expect((logSpy.mock.calls.flat() as string[]).join(" ")).toContain("none");
   });
 
   it("includes simulated event data with a walletAddress field", async () => {
@@ -712,7 +705,7 @@ describe("Resilience Features", () => {
 
   describe("Structured Logging", () => {
     it("logs metrics when enabled", async () => {
-      const logSpy = serviceLoggerMock.info;
+      const logSpy = console.log as unknown as Mock;
       logSpy.mockClear();
       
       const config: HorizonListenerConfig = {
@@ -728,11 +721,11 @@ describe("Resilience Features", () => {
       
       // Should have logged metrics
       const logCalls = logSpy.mock.calls.flat().join(" ");
-      expect(logCalls).toContain("horizon:metrics");
+      expect(logCalls).toContain("Metrics:");
     });
 
     it("does not log metrics when disabled", async () => {
-      const logSpy = serviceLoggerMock.info;
+      const logSpy = console.log as unknown as Mock;
       logSpy.mockClear();
       
       const config: HorizonListenerConfig = {
@@ -745,7 +738,7 @@ describe("Resilience Features", () => {
       
       // Should not have logged detailed metrics
       const logCalls = logSpy.mock.calls.flat().join(" ");
-      expect(logCalls).not.toContain("horizon:metrics");
+      expect(logCalls).not.toContain("Metrics:");
     });
   });
 

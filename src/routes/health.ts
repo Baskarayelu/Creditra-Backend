@@ -20,8 +20,6 @@ import { Router } from 'express';
 import { ok } from '../utils/response.js';
 import { getConnection } from '../db/client.js';
 import { resolveConfig } from '../services/horizonListener.js';
-import { validateResponse } from '../middleware/validate.js';
-import { envelopedHealthSchema } from '../schemas/index.js';
 
 export const healthRouter = Router();
 
@@ -89,13 +87,10 @@ async function checkHorizon(): Promise<DependencyHealth> {
      const horizonUrl = resolveConfig().horizonUrl;
 
      try {
-          const response = await fetchWithTimeout(horizonUrl, {
-               timeouts: {
-                    connectTimeoutMs: HORIZON_CHECK_TIMEOUT_MS,
-                    readTimeoutMs: 0,
-               },
-               retry: false,
-          });
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), HORIZON_CHECK_TIMEOUT_MS);
+          const response = await fetch(horizonUrl, { signal: controller.signal });
+          clearTimeout(timeout);
 
           if (!response.ok) {
                return { status: 'degraded', message: `Horizon returned HTTP ${response.status}` };
@@ -114,7 +109,7 @@ async function checkHorizon(): Promise<DependencyHealth> {
      }
 }
 
-healthRouter.get('/', validateResponse(envelopedHealthSchema), async (_req, res) => {
+healthRouter.get('/', async (_req, res) => {
      const [dbStatus, horizonStatus] = await Promise.all([checkDatabase(), checkHorizon()]);
      const ready = dbStatus.status === 'ok' && horizonStatus.status === 'ok';
 

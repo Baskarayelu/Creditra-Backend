@@ -18,7 +18,6 @@ For **external penetration-test preparation** (scope, auth bypass checks, rate l
 - [ ] Role-based access control (RBAC) is implemented where needed
 - [ ] Users can only access their own credit lines and data
 - [ ] Admin endpoints have separate authorization checks
-- [ ] Admin shared-secret comparisons use constant-time equality checks
 - [ ] Authorization checks occur on every request (not cached insecurely)
 - [ ] Principle of least privilege is applied to all roles
 
@@ -48,7 +47,7 @@ For **external penetration-test preparation** (scope, auth bypass checks, rate l
 ### Content Type Validation
 - [ ] Content-Type headers are validated
 - [ ] JSON parsing errors are handled gracefully
-- [ ] Request size limits are enforced (prevent DoS) — default 100 KiB, bulk 1 MiB; reverse proxy ≥ `BODY_LIMIT_MAX_BYTES` (see `docs/body-limits.md`)
+- [ ] Request size limits are enforced (prevent DoS)
 
 ## 3. Logging & Monitoring
 
@@ -62,7 +61,7 @@ For **external penetration-test preparation** (scope, auth bypass checks, rate l
 ### Log Content
 - [ ] Logs include timestamp, user ID, IP address, endpoint, and action
 - [ ] Logs DO NOT contain sensitive data (passwords, tokens, PII)
-- [ ] Logs DO NOT contain full credit card numbers, wallet private keys, Stellar secret seeds, muxed accounts, or email addresses
+- [ ] Logs DO NOT contain full credit card or wallet private keys
 - [ ] Error messages to clients are generic (detailed errors only in logs)
 
 ### Log Security
@@ -106,12 +105,11 @@ For **external penetration-test preparation** (scope, auth bypass checks, rate l
 - [ ] Preflight requests handled correctly
 
 ### HTTP Headers
-- [x] `Strict-Transport-Security` header set (HSTS) — Helmet via `applySecurityPosture`
-- [x] `X-Content-Type-Options: nosniff` header set
-- [x] `X-Frame-Options: DENY` or `SAMEORIGIN` header set (`DENY`)
-- [x] `Content-Security-Policy` header configured (self + Swagger-safe inline)
-- [x] `X-Powered-By` removed; `Referrer-Policy: no-referrer`
-- [x] `TRUST_PROXY` documented for reverse-proxy deployments (`src/config/security.ts`)
+- [ ] `Strict-Transport-Security` header set (HSTS)
+- [ ] `X-Content-Type-Options: nosniff` header set
+- [ ] `X-Frame-Options: DENY` or `SAMEORIGIN` header set
+- [ ] `Content-Security-Policy` header configured
+- [ ] `X-XSS-Protection` header set (legacy browsers)
 
 ### API Keys & Secrets
 - [ ] API keys are not hardcoded in source code

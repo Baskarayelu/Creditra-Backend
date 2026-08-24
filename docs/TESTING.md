@@ -23,7 +23,7 @@ The backend ships with a layered test suite designed so every domain decision is
 flowchart TB
     subgraph Unit
       U1[Utils tests<br/>numbers · result · time · ...]
-      U2[Service unit tests<br/>CreditLineService · RiskEvaluationService<br/>sorobanClient · drawWebhookService]
+      U2[Service unit tests<br/>CreditLineService · RiskEvaluationService<br/>sorobanRpcClient · drawWebhookService]
       U3[Repository unit tests<br/>InMemory* + Postgres*]
       U4[Provider unit tests<br/>Rules · Static · External · factory]
       U5[Schema unit tests]
@@ -47,7 +47,7 @@ flowchart TB
 Domain rules, in isolation, no I/O:
 
 - `src/utils/__tests__/` — `fetchWithTimeout`, `httpStatus`, `numbers`, `objects`, `result`, `strings`, `time`, `constants`.
-- `src/services/__tests__/` — `CreditLineService`, `RiskEvaluationService`, `reconciliationService`, `sorobanClient`, `sorobanRpcClient`, `drawWebhookService`.
+- `src/services/__tests__/` — `CreditLineService`, `RiskEvaluationService`, `sorobanClient`, `sorobanRpcClient`, `drawWebhookService`.
 - `src/repositories/memory/__tests__/` — In-memory implementations of all repositories.
 - `src/repositories/postgres/__tests__/` — Postgres CreditLine repository with a stub `DbClient`.
 - `src/services/providers/__tests__/` — `RulesEngineRiskProvider`, `StaticRiskProvider`, `ExternalApiRiskProvider`, `providerFactory`.
@@ -63,9 +63,7 @@ Boundaries exercised end-to-end against an in-memory container:
 - `tests/draw-credit.test.ts` — draw endpoint validation, Stellar address parsing, pending status.
 - `tests/cors.test.ts` — `isAllowedCorsOrigin()` matrix (loopback fallback, production allowlist).
 - `tests/response.test.ts` — `ok()`/`fail()` envelope helpers.
-- `tests/middleware/*` — `errorHandler`, `rateLimit`, `validate`, response-schema validation, body limits.
-- `tests/response-contract.test.ts` — Zod `assertMatchesSchema` checks on live HTTP responses (prevents API contract drift).
-- `tests/schemas/*` — request + response schema unit tests (strict keys, Stellar addresses, pagination bounds).
+- `tests/middleware/*` — `errorHandler`, `rateLimit`, `validate`, body limits.
 - `src/routes/__tests__/reconciliation.integration.test.ts` — schedule → run → status flow.
 
 ### System (~11 files)
@@ -139,7 +137,7 @@ Output paths after `npm run test:coverage`:
 - The DI container makes substitution trivial: tests call `Container.getInstance().setRepositories(stubs)` to swap implementations.
 - Risk providers default to `StaticRiskProvider` in tests for determinism.
 - HTTP fakes use Supertest against the Express app — **never** the real network.
-- Reconciliation tests normally leave `CREDIT_CONTRACT_ID` empty so `createSorobanClient()` selects `MockSorobanClient`; real Soroban read tests inject `StellarSorobanClient` with a mocked fetch implementation and contract-shaped XDR fixtures.
+- The Soroban client default is `MockSorobanClient`, returning empty datasets, so reconciliation tests can assert behaviour under various drift conditions by composing repository state vs mock client output.
 
 ---
 

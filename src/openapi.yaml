@@ -1,15 +1,9 @@
 openapi: 3.0.3
 info:
   title: Creditra API
-  version: 1.0.0
+  version: 0.1.0
   description: |
     Backend API for Creditra – on-chain credit scoring and risk evaluation.
-
-    ## API versioning
-    Canonical routes are under `/api/v1/*`. Unversioned `/api/*` paths remain
-    available during a transition window and return `Deprecation`, `Sunset`,
-    and `Link: rel="successor-version"` headers. See docs/api-versioning.md.
-    Responses under `/api/v1/*` and legacy `/api/*` include `X-API-Version: 1`.
 
     Browser clients are restricted by a CORS allowlist. Production deployments
     must set `CORS_ORIGINS` to a comma-separated list of exact origins; local
@@ -18,45 +12,11 @@ info:
     ## Authentication
     Protected endpoints require a valid API key passed via the `X-API-Key` header.
     API keys are configured via the `API_KEYS` environment variable (comma-separated).
-    Admin-only operations additionally accept `X-Admin-Api-Key` (env `ADMIN_API_KEY`).
-
-    ## Rate limiting
-    Public and authenticated API routes are protected by a **token-bucket** limiter
-    with per-route defaults:
-
-    | Route group | Env knobs | Default capacity / window |
-    |---|---|---|
-    | General (`/api/credit/*`, `/api/risk/wallet/*`, …) | `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_MS` | 100 / 60s |
-    | Risk evaluate (`POST /api/risk/evaluate`) | `RATE_LIMIT_MAX_EVALUATE`, `RATE_LIMIT_WINDOW_MS` | 10 / 60s |
-
-    Every limited response includes:
-
-    - `X-RateLimit-Limit` — bucket capacity
-    - `X-RateLimit-Remaining` — whole tokens remaining after the request
-    - `X-RateLimit-Reset` — Unix epoch seconds when the bucket is next full
-    - `Retry-After` — only on `429`; seconds until at least one token is available
-
-    ### Admin / service bypass
-    Requests that present a valid `X-Admin-Api-Key` matching `ADMIN_API_KEY` are
-    **not charged** against the bucket. The response still includes rate-limit
-    headers and sets `X-RateLimit-Bypass: admin`. When `ADMIN_API_KEY` is unset
-    the bypass path is disabled (fail closed).
-
-    Optional shared store: set `RATE_LIMIT_REDIS_URL` for multi-replica counters
-    (`RATE_LIMIT_REDIS_FAILURE_MODE=open|closed`, default `open`).
-
-    ## Idempotent POST retries
-    POST mutations accept an optional `Idempotency-Key` header. Reusing the same
-    key with the same route, principal, and request body returns the original
-    non-5xx response instead of executing the mutation again.
 
     ## Keeping the spec in sync
-    - **Zod schemas** in `src/schemas/` are the runtime source of truth for request
-      and response validation. This OpenAPI document should mirror those schemas.
     - Every new route **must** have a corresponding entry here before merging.
     - Run `npm run validate:spec` in CI to catch YAML/structural errors early.
     - Use path-level `operationId` values as the source of truth for client generation.
-    - See `docs/json-schema-validation.md` for request/response validation policy.
 
 servers:
   - url: http://localhost:3000
@@ -71,15 +31,6 @@ tags:
     description: On-chain risk evaluation
   - name: Webhooks
     description: Draw confirmation webhook management
-  - name: Inbound Webhooks
-    description: Signed partner webhook ingestion (HMAC + replay protection)
-  - name: Reconciliation
-    description: Admin control plane for DB-vs-chain reconciliation
-  - name: Compliance Exports
-    description: |
-      Admin-only CSV/JSON exports for audit and compliance.
-      Require `X-Admin-Api-Key`, a bounded date range (max 90 days), and
-      respect a hard row ceiling (5000). See docs/COMPLIANCE_EXPORTS.md.
 
 security:
   - ApiKeyAuth: []
@@ -93,13 +44,6 @@ components:
       description: |
         API key for authenticated endpoints. Required for admin operations.
         Keys are configured via the `API_KEYS` environment variable.
-    AdminApiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-Admin-Api-Key
-      description: |
-        Operator admin key for destructive and compliance operations.
-        Configured via the `ADMIN_API_KEY` environment variable.
 
   schemas:
     HealthResponse:
@@ -134,9 +78,6 @@ components:
 
     UpdateCreditLineRequest:
       type: object
-      description: |
-        Partial update body (updateCreditLineSchema). At least one of the
-        updatable fields must be present. Unknown keys are rejected.
       properties:
         creditLimit:
           type: string
@@ -151,31 +92,6 @@ components:
           type: string
           enum: [active, suspended, closed]
           description: Credit line status
-        expectedVersion:
-          type: integer
-          minimum: 1
-          description: >
-            Optimistic-locking guard. When provided, the update only succeeds
-            if it equals the stored `version`; otherwise the server returns
-            `409 Conflict`. Omit for unconditional (last-write-wins) updates.
-          example: 3
-      additionalProperties: false
-
-    CreditLineAmountRequest:
-      type: object
-      required: [walletAddress, amount]
-      properties:
-        walletAddress:
-          type: string
-          minLength: 1
-          maxLength: 256
-          description: Stellar wallet address submitting the action
-          example: "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOUJ3LNLRK"
-        amount:
-          type: string
-          pattern: "^\\d+(\\.\\d+)?$"
-          description: Action amount as a decimal string
-          example: "250.00"
       additionalProperties: false
 
     CreditLine:
@@ -209,14 +125,6 @@ components:
           type: string
           enum: [active, suspended, closed]
           description: Current credit line status
-        version:
-          type: integer
-          minimum: 1
-          description: >
-            Optimistic-locking version, incremented on each update. Pass the
-            value you read back as `expectedVersion` on a subsequent update to
-            guard against lost writes.
-          example: 1
         createdAt:
           type: string
           format: date-time
@@ -225,38 +133,6 @@ components:
           type: string
           format: date-time
           description: ISO 8601 last update timestamp
-
-    CursorPagination:
-      type: object
-      description: |
-        Standard cursor pagination meta block used by every list endpoint in
-        cursor mode. Cursors are opaque base64url strings; clients must pass
-        `nextCursor` back verbatim and must not parse them.
-      required: [limit, nextCursor, hasMore]
-      properties:
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 100
-          description: Page size applied to this response
-        nextCursor:
-          type: string
-          nullable: true
-          description: Opaque cursor for the next page, or null when hasMore is false
-        hasMore:
-          type: boolean
-          description: True when additional items exist after this page
-
-    CursorPage:
-      type: object
-      description: Generic envelope for cursor-paginated collections
-      required: [items, pagination]
-      properties:
-        items:
-          type: array
-          items: {}
-        pagination:
-          $ref: "#/components/schemas/CursorPagination"
 
     CreditLinesResponse:
       type: object
@@ -267,18 +143,15 @@ components:
           items:
             $ref: "#/components/schemas/CreditLine"
         pagination:
-          oneOf:
-            - type: object
-              description: Offset/limit mode (legacy)
-              properties:
-                total:
-                  type: integer
-                offset:
-                  type: integer
-                limit:
-                  type: integer
-              required: [total, offset, limit]
-            - $ref: "#/components/schemas/CursorPagination"
+          type: object
+          properties:
+            total:
+              type: integer
+            offset:
+              type: integer
+            limit:
+              type: integer
+          required: [total, offset, limit]
 
     WalletCreditLinesResponse:
       type: object
@@ -298,28 +171,6 @@ components:
         message:
           type: string
           example: "Credit line suspended."
-
-    CreditLineTransactionSubmitResponse:
-      type: object
-      required: [id, walletAddress, amount, txHash, status]
-      properties:
-        id:
-          type: string
-          description: Credit line identifier
-        walletAddress:
-          type: string
-          description: Stellar wallet address that submitted the request
-        amount:
-          type: string
-          description: Submitted amount as a decimal string
-        txHash:
-          type: string
-          nullable: true
-          description: Submitted transaction hash, or null when queued locally
-        status:
-          type: string
-          enum: [submitted, pending]
-          description: Whether the Soroban transaction was submitted or left pending
 
     # ── Transaction Schemas ──────────────────────────────────────────────────
 
@@ -364,60 +215,25 @@ components:
       required: [data]
       properties:
         data:
-          oneOf:
-            - type: object
-              description: Legacy page/limit pagination
-              required: [transactions, total, page, limit, totalPages]
-              properties:
-                transactions:
-                  type: array
-                  items:
-                    $ref: "#/components/schemas/Transaction"
-                total:
-                  type: integer
-                  description: Total number of transactions matching the applied filters
-                page:
-                  type: integer
-                  description: Current page number (1-indexed)
-                limit:
-                  type: integer
-                  description: Maximum number of transactions per page
-                totalPages:
-                  type: integer
-                  description: Total number of pages available
-            - type: object
-              description: Standard cursor pagination (preferred)
-              required: [transactions, pagination]
-              properties:
-                transactions:
-                  type: array
-                  items:
-                    $ref: "#/components/schemas/Transaction"
-                pagination:
-                  $ref: "#/components/schemas/CursorPagination"
-
-    WebhookDeliveryRecord:
-      type: object
-      required: [drawId, url, status, attempts, updatedAt]
-      properties:
-        drawId:
-          type: string
-        url:
-          type: string
-          format: uri
-        status:
-          type: string
-          enum: [delivered, failed, dead_letter]
-        attempts:
-          type: integer
-        lastError:
-          type: string
-        deliveredAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
+          type: object
+          required: [transactions, total, page, limit, totalPages]
+          properties:
+            transactions:
+              type: array
+              items:
+                $ref: "#/components/schemas/Transaction"
+            total:
+              type: integer
+              description: Total number of transactions matching the applied filters
+            page:
+              type: integer
+              description: Current page number (1-indexed)
+            limit:
+              type: integer
+              description: Maximum number of transactions per page
+            totalPages:
+              type: integer
+              description: Total number of pages available
 
     # ── Risk Evaluation Schemas ───────────────────────────────────────────────
 
@@ -505,74 +321,6 @@ components:
           items:
             $ref: "#/components/schemas/RiskEvaluation"
 
-    RiskSignal:
-      type: object
-      description: |
-        Anomaly detection risk signal (advisory). Thresholds and evidence make
-        the decision explainable. See docs/ANOMALY_DETECTION.md.
-      required:
-        - id
-        - signalType
-        - ruleId
-        - severity
-        - walletAddress
-        - creditLineId
-        - correlationId
-        - thresholds
-        - evidence
-        - status
-        - createdAt
-      properties:
-        id:
-          type: string
-          format: uuid
-        signalType:
-          type: string
-          enum: [rapid_successive_draws, draw_burst, unusual_repay_pattern]
-        ruleId:
-          type: string
-          example: rule.rapid_successive_draws
-        severity:
-          type: string
-          enum: [low, medium, high]
-        walletAddress:
-          type: string
-        creditLineId:
-          type: string
-          format: uuid
-        correlationId:
-          type: string
-          description: Links signal to the activity evaluation that produced it
-        thresholds:
-          type: object
-          additionalProperties: true
-          description: Snapshot of rule thresholds at evaluation time
-        evidence:
-          type: object
-          additionalProperties: true
-          description: Activity counts/amounts/timestamps that fired the rule
-        status:
-          type: string
-          enum: [open, acknowledged, dismissed]
-        createdAt:
-          type: string
-          format: date-time
-
-    RiskSignalListResponse:
-      type: object
-      required: [signals, total, offset, limit]
-      properties:
-        signals:
-          type: array
-          items:
-            $ref: "#/components/schemas/RiskSignal"
-        total:
-          type: integer
-        offset:
-          type: integer
-        limit:
-          type: integer
-
     # ── Webhook Schemas ───────────────────────────────────────────────────────
 
     WebhookConfigResponse:
@@ -635,35 +383,6 @@ components:
         timeoutMs:
           type: integer
 
-    InboundWebhookRequest:
-      type: object
-      required: [event]
-      properties:
-        event:
-          type: string
-          example: partner.updated
-      additionalProperties: true
-      description: |
-        Free-form partner payload. Prefer including a stable `event` name.
-        The raw JSON body is part of the HMAC input — do not re-serialize after signing.
-
-    InboundWebhookAcceptedResponse:
-      type: object
-      properties:
-        data:
-          type: object
-          required: [accepted, event]
-          properties:
-            accepted:
-              type: boolean
-              example: true
-            event:
-              type: string
-              example: partner.updated
-        error:
-          type: string
-          nullable: true
-
     AdminRecalibrateResponse:
       type: object
       properties:
@@ -671,356 +390,25 @@ components:
           type: string
           example: "Risk model recalibration triggered"
 
-    SupportCreditLineSnapshot:
-      type: object
-      required:
-        - id
-        - walletAddress
-        - creditLimit
-        - availableCredit
-        - utilized
-        - interestRateBps
-        - status
-        - version
-        - createdAt
-        - updatedAt
-      properties:
-        id:
-          type: string
-          format: uuid
-        walletAddress:
-          type: string
-          description: Truncated Stellar wallet (e.g. GDRXE2...NLRK)
-          example: "GDRXE2...NLRK"
-        creditLimit:
-          type: string
-          example: "5000.00"
-        availableCredit:
-          type: string
-        utilized:
-          type: string
-        interestRateBps:
-          type: integer
-        status:
-          type: string
-        version:
-          type: integer
-          nullable: true
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
-    SupportTransactionSnapshot:
-      type: object
-      required:
-        - id
-        - creditLineId
-        - walletAddress
-        - amount
-        - type
-        - status
-        - blockchainTxHash
-        - createdAt
-        - processedAt
-      properties:
-        id:
-          type: string
-        creditLineId:
-          type: string
-        walletAddress:
-          type: string
-          description: Truncated Stellar wallet
-        amount:
-          type: string
-        type:
-          type: string
-        status:
-          type: string
-        blockchainTxHash:
-          type: string
-          nullable: true
-        createdAt:
-          type: string
-          format: date-time
-        processedAt:
-          type: string
-          format: date-time
-          nullable: true
-
-    SupportReconciliationStatus:
-      type: object
-      required: [workerRunning, queueSize, failedJobs, readOnly]
-      properties:
-        workerRunning:
-          type: boolean
-        queueSize:
-          type: integer
-          minimum: 0
-        failedJobs:
-          type: integer
-          minimum: 0
-        readOnly:
-          type: boolean
-          enum: [true]
-          description: Always true — support tools never schedule reconciliation jobs
-
-    SupportBorrowerLookupResponse:
-      type: object
-      properties:
-        data:
-          type: object
-          required:
-            - walletAddress
-            - creditLines
-            - recentTransactions
-            - reconciliation
-            - generatedAt
-            - found
-          properties:
-            walletAddress:
-              type: string
-              description: Truncated wallet used for the lookup
-            creditLines:
-              type: array
-              items:
-                $ref: "#/components/schemas/SupportCreditLineSnapshot"
-            recentTransactions:
-              type: array
-              items:
-                $ref: "#/components/schemas/SupportTransactionSnapshot"
-            reconciliation:
-              $ref: "#/components/schemas/SupportReconciliationStatus"
-            generatedAt:
-              type: string
-              format: date-time
-            found:
-              type: boolean
-              description: False when the wallet has no credit lines (still HTTP 200)
-        error:
-          type: string
-          nullable: true
-
-    SupportCreditLineLookupResponse:
-      type: object
-      properties:
-        data:
-          type: object
-          required:
-            - creditLine
-            - recentTransactions
-            - reconciliation
-            - generatedAt
-          properties:
-            creditLine:
-              $ref: "#/components/schemas/SupportCreditLineSnapshot"
-            recentTransactions:
-              type: array
-              items:
-                $ref: "#/components/schemas/SupportTransactionSnapshot"
-            reconciliation:
-              $ref: "#/components/schemas/SupportReconciliationStatus"
-            generatedAt:
-              type: string
-              format: date-time
-        error:
-          type: string
-          nullable: true
-
-    SupportTransactionsResponse:
-      type: object
-      properties:
-        data:
-          type: object
-          required: [transactions]
-          properties:
-            transactions:
-              type: array
-              items:
-                $ref: "#/components/schemas/SupportTransactionSnapshot"
-        error:
-          type: string
-          nullable: true
-
-    SupportReconciliationStatusResponse:
-      type: object
-      properties:
-        data:
-          $ref: "#/components/schemas/SupportReconciliationStatus"
-        error:
-          type: string
-          nullable: true
-
-    ReconciliationTriggerResponse:
-      type: object
-      properties:
-        data:
-          type: object
-          required: [jobId, message]
-          properties:
-            jobId:
-              type: string
-              description: Identifier for the scheduled reconciliation job
-            message:
-              type: string
-              example: Reconciliation job scheduled
-        error:
-          type: string
-          nullable: true
-
-    ReconciliationStatusResponse:
-      type: object
-      properties:
-        data:
-          type: object
-          required: [workerRunning, queueSize, failedJobs]
-          properties:
-            workerRunning:
-              type: boolean
-            queueSize:
-              type: integer
-              minimum: 0
-            failedJobs:
-              type: integer
-              minimum: 0
-        error:
-          type: string
-          nullable: true
-
     # ── Error Schemas ─────────────────────────────────────────────────────────
 
-    Problem:
+    ErrorResponse:
       type: object
-      description: |
-        RFC 7807 problem+json with Creditra taxonomy extensions.
-        Content-Type: application/problem+json
-        See docs/problem-json.md and docs/error-envelope.md.
-      required: [type, title, status, detail, code, data, error]
+      required: [error]
       properties:
-        type:
-          type: string
-          format: uri
-          example: "https://docs.creditra.dev/problems/validation_failed"
-        title:
-          type: string
-          example: "Validation Error"
-        status:
-          type: integer
-          example: 400
-        detail:
-          type: string
-          example: "Validation failed"
-        code:
-          type: string
-          description: Stable machine code clients should branch on
-          enum:
-            - validation_failed
-            - unauthorized
-            - forbidden
-            - not_found
-            - duplicate_resource
-            - version_conflict
-            - invalid_state_transition
-            - unique_constraint_violation
-            - payload_too_large
-            - unsupported_media_type
-            - rate_limited
-            - upstream_failure
-            - upstream_timeout
-            - service_unavailable
-            - internal_error
-        details:
-          description: Optional field issues or safe context (never secrets)
-          oneOf:
-            - type: array
-              items:
-                type: object
-                properties:
-                  field:
-                    type: string
-                  message:
-                    type: string
-            - type: object
-              additionalProperties: true
-        resource:
-          type: string
-          description: Optional resource kind
-        retryAfter:
-          type: integer
-          description: Seconds until retry (rate limit); also Retry-After header
-        data:
-          type: "null"
-          description: Legacy envelope compatibility (always null on errors)
         error:
           type: string
-          description: Legacy envelope compatibility (same text as detail)
-
-    ErrorResponse:
-      allOf:
-        - $ref: "#/components/schemas/Problem"
-      description: |
-        Error responses use RFC 7807 problem+json (alias of Problem).
-        Legacy clients may still read `error` / `data`.
-
-    ConflictProblem:
-      allOf:
-        - $ref: "#/components/schemas/Problem"
-      description: HTTP 409 conflict problem+json
+        id:
+          type: string
+          description: Present on 404 responses that reference a specific resource
 
     RateLimitErrorResponse:
-      allOf:
-        - $ref: "#/components/schemas/Problem"
-      description: Rate limit problem+json (code=rate_limited)
-
-    ExportMeta:
       type: object
-      required: [resource, format, count, limit, offset, truncated, from, to, generatedAt]
+      required: [error]
       properties:
-        resource:
-          type: string
-          enum: [credit-lines, transactions, audit]
-        format:
-          type: string
-          enum: [json, csv]
-        count:
-          type: integer
-          minimum: 0
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 5000
-        offset:
-          type: integer
-          minimum: 0
-        truncated:
-          type: boolean
-          description: True when more matching rows exist beyond this page
-        from:
-          type: string
-          format: date-time
-        to:
-          type: string
-          format: date-time
-        generatedAt:
-          type: string
-          format: date-time
-
-    ComplianceExportResponse:
-      type: object
-      required: [data, meta, error]
-      properties:
-        data:
-          type: array
-          items:
-            type: object
-            additionalProperties: true
-        meta:
-          $ref: "#/components/schemas/ExportMeta"
         error:
           type: string
-          nullable: true
+          example: "Too many requests"
 
 paths:
   /health:
@@ -1040,317 +428,15 @@ paths:
                 status: ok
                 service: creditra-backend
 
-  # ── Reconciliation Routes ───────────────────────────────────────────────────
-
-  /api/v1/reconciliation/trigger:
-    post:
-      tags: [Reconciliation]
-      operationId: triggerReconciliation
-      summary: Schedule a reconciliation job
-      description: Admin-gated endpoint that schedules a DB-vs-chain reconciliation job and returns immediately.
-      parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
-      responses:
-        "202":
-          description: Reconciliation job scheduled
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReconciliationTriggerResponse"
-              example:
-                data:
-                  jobId: "reconciliation-1710000000000"
-                  message: Reconciliation job scheduled
-                error: null
-        "401":
-          description: Missing API key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: Invalid API key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Failed to schedule reconciliation
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/v1/reconciliation/status:
-    get:
-      tags: [Reconciliation]
-      operationId: getReconciliationStatus
-      summary: Get reconciliation worker and queue status
-      description: Admin-gated endpoint for dashboards and alerts to inspect worker and queue health.
-      responses:
-        "200":
-          description: Reconciliation status
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReconciliationStatusResponse"
-              example:
-                data:
-                  workerRunning: true
-                  queueSize: 0
-                  failedJobs: 0
-                error: null
-        "401":
-          description: Missing API key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: Invalid API key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Failed to get reconciliation status
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  # ── Support Tools (read-only, admin) ─────────────────────────────────────
-
-  /api/support/borrowers/{walletAddress}:
-    get:
-      tags: [Support]
-      operationId: supportBorrowerLookup
-      summary: Safe borrower troubleshooting lookup
-      description: |
-        Read-only composite view for incident response: credit-line snapshots,
-        recent transactions, and reconciliation control-plane status.
-        Requires `X-Admin-Api-Key`. Wallet addresses in the response are truncated.
-        Never mutates state or schedules jobs.
-      security:
-        - AdminApiKeyAuth: []
-      parameters:
-        - name: walletAddress
-          in: path
-          required: true
-          schema:
-            type: string
-            minLength: 56
-            maxLength: 56
-          description: Full Stellar G-address used for lookup
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 20
-          description: Max recent transactions to include
-      responses:
-        "200":
-          description: Borrower support view (found may be false when no lines exist)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportBorrowerLookupResponse"
-              example:
-                data:
-                  walletAddress: "GDRXE2...NLRK"
-                  creditLines: []
-                  recentTransactions: []
-                  reconciliation:
-                    workerRunning: true
-                    queueSize: 0
-                    failedJobs: 0
-                    readOnly: true
-                  generatedAt: "2026-01-15T12:00:00.000Z"
-                  found: false
-                error: null
-        "400":
-          description: Invalid wallet address or query
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
-          description: Admin authentication not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/support/credit-lines/{id}:
-    get:
-      tags: [Support]
-      operationId: supportCreditLineLookup
-      summary: Credit-line troubleshooting snapshot
-      description: |
-        Read-only snapshot of a single credit line plus recent transactions and
-        reconciliation status. Requires `X-Admin-Api-Key`. Responses redact wallets.
-      security:
-        - AdminApiKeyAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 20
-      responses:
-        "200":
-          description: Credit line support view
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportCreditLineLookupResponse"
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Credit line not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
-          description: Admin authentication not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/support/credit-lines/{id}/transactions:
-    get:
-      tags: [Support]
-      operationId: supportCreditLineTransactions
-      summary: Recent transactions for support troubleshooting
-      description: |
-        Read-only recent transaction list for a credit line. Requires
-        `X-Admin-Api-Key`. Wallet addresses are truncated in the payload.
-      security:
-        - AdminApiKeyAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 20
-      responses:
-        "200":
-          description: Recent transactions
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportTransactionsResponse"
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Credit line not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
-          description: Admin authentication not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/support/reconciliation/status:
-    get:
-      tags: [Support]
-      operationId: supportReconciliationStatus
-      summary: Read-only reconciliation control-plane status
-      description: |
-        Observational reconciliation worker/queue status for support tooling.
-        Unlike `POST /api/reconciliation/trigger`, this endpoint never schedules jobs.
-        Requires `X-Admin-Api-Key`. Response always includes `readOnly: true`.
-      security:
-        - AdminApiKeyAuth: []
-      responses:
-        "200":
-          description: Reconciliation status (read-only)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportReconciliationStatusResponse"
-              example:
-                data:
-                  workerRunning: true
-                  queueSize: 0
-                  failedJobs: 0
-                  readOnly: true
-                error: null
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
-          description: Admin authentication not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
   # ── Credit Lines Routes ─────────────────────────────────────────────────────
 
-  /api/v1/credit/lines:
+  /api/credit/lines:
     get:
       tags: [Credit]
       operationId: listCreditLines
       summary: List all credit lines
-      description: |
-        Supports two pagination modes:
-        - **Cursor (preferred):** pass `cursor` (empty for the first page). Response
-          pagination is `{ limit, nextCursor, hasMore }` with opaque cursors.
-        - **Offset (legacy):** pass `offset` / `limit` without `cursor`.
-        See `docs/cursor-pagination.md`.
       security: []
       parameters:
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
-          description: >
-            Opaque cursor from a previous response. Presence (even empty)
-            enables cursor pagination mode.
         - name: offset
           in: query
           required: false
@@ -1358,7 +444,7 @@ paths:
             type: integer
             minimum: 0
             default: 0
-          description: Pagination offset (legacy mode; ignored when cursor is present)
+          description: Pagination offset
         - name: limit
           in: query
           required: false
@@ -1367,70 +453,59 @@ paths:
             minimum: 1
             maximum: 100
             default: 100
-          description: Number of credit lines per page (validated by creditLinesQuerySchema)
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
-          description: |
-            When present (including empty string), switches to cursor pagination.
-            Pass `nextCursor` from the previous page for subsequent pages.
+          description: Number of credit lines per page
       responses:
         "200":
-          description: |
-            Offset mode returns `{ data: { creditLines, pagination }, error: null }`.
-            Cursor mode returns an unenveloped `{ creditLines, pagination }` body
-            (see docs/cursor-pagination.md).
+          description: Array of credit lines (may be empty)
           headers:
             X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
+              description: Maximum requests allowed per window
+              schema:
+                type: integer
+                example: 100
             X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
+              description: Requests remaining in current window
+              schema:
+                type: integer
+                example: 95
             X-RateLimit-Reset:
-              $ref: "#/components/headers/X-RateLimit-Reset"
-            X-RateLimit-Bypass:
-              $ref: "#/components/headers/X-RateLimit-Bypass"
+              description: Unix timestamp when the rate limit window resets
+              schema:
+                type: integer
+                example: 1700000060
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CreditLinesResponse"
-              examples:
-                offsetMode:
-                  summary: Legacy offset pagination
-                  value:
-                    data:
-                      creditLines: []
-                      pagination:
-                        total: 0
-                        offset: 0
-                        limit: 100
-                    error: null
-                cursorMode:
-                  summary: Standard cursor pagination
-                  value:
-                    creditLines: []
-                    pagination:
-                      limit: 25
-                      nextCursor: null
-                      hasMore: false
+              example:
+                creditLines: []
+                pagination:
+                  total: 0
+                  offset: 0
+                  limit: 100
         "400":
-          description: Invalid query parameter (Zod validation)
+          description: Invalid query parameter
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ValidationErrorResponse"
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
-          description: Token bucket empty — rate limit exceeded
+          description: Rate limit exceeded
           headers:
             Retry-After:
-              $ref: "#/components/headers/Retry-After"
+              description: Seconds to wait before retrying
+              schema:
+                type: integer
+                example: 47
             X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
+              schema:
+                type: integer
             X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
+              schema:
+                type: integer
             X-RateLimit-Reset:
-              $ref: "#/components/headers/X-RateLimit-Reset"
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -1441,8 +516,6 @@ paths:
       operationId: createCreditLine
       summary: Create a new credit line
       security: []
-      parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -1465,38 +538,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: >
-            Duplicate open credit line for this wallet. Close the existing open
-            line before opening another. Response is RFC 7807 problem+json with
-            stable `code` `duplicate_resource` (or `unique_constraint_violation`).
-            Sensitive identifiers are never included in `detail`/`details`.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
-              example:
-                type: "https://docs.creditra.dev/problems/duplicate_resource"
-                title: Conflict
-                status: 409
-                detail: "An open credit line already exists for this wallet. Close it before opening another."
-                code: duplicate_resource
-                resource: credit_line
-                details:
-                  field: walletAddress
-                  existingStatus: active
-                data: null
-                error: "An open credit line already exists for this wallet. Close it before opening another."
 
-  /api/v1/credit/lines/{id}:
+  /api/credit/lines/{id}:
     get:
       tags: [Credit]
       operationId: getCreditLineById
       summary: Get a credit line by ID
-      description: |
-        Returns a single credit line. Supports conditional GET via `ETag` /
-        `If-None-Match` (see docs/etag-caching.md). The ETag is a content hash
-        of the response envelope and changes whenever the line's state changes.
       security: []
       parameters:
         - name: id
@@ -1505,36 +552,23 @@ paths:
           schema:
             type: string
           description: Credit line identifier
-        - $ref: "#/components/parameters/IfNoneMatch"
       responses:
         "200":
           description: Credit line found
           headers:
-            ETag:
-              $ref: "#/components/headers/ETag"
-            Cache-Control:
-              $ref: "#/components/headers/CacheControlPrivateRevalidate"
             X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
+              schema:
+                type: integer
             X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
+              schema:
+                type: integer
             X-RateLimit-Reset:
-              $ref: "#/components/headers/X-RateLimit-Reset"
-            X-RateLimit-Bypass:
-              $ref: "#/components/headers/X-RateLimit-Bypass"
+              schema:
+                type: integer
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CreditLine"
-        "304":
-          description: |
-            Not Modified — the representation matching `If-None-Match` is still
-            current. Body is empty; reuse the previously cached payload.
-          headers:
-            ETag:
-              $ref: "#/components/headers/ETag"
-            Cache-Control:
-              $ref: "#/components/headers/CacheControlPrivateRevalidate"
         "404":
           description: Credit line not found
           content:
@@ -1545,16 +579,20 @@ paths:
                 error: Credit line not found
                 id: "abc123"
         "429":
-          description: Token bucket empty — rate limit exceeded
+          description: Rate limit exceeded
           headers:
             Retry-After:
-              $ref: "#/components/headers/Retry-After"
+              schema:
+                type: integer
             X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
+              schema:
+                type: integer
             X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
+              schema:
+                type: integer
             X-RateLimit-Reset:
-              $ref: "#/components/headers/X-RateLimit-Reset"
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -1582,7 +620,6 @@ paths:
               creditLimit: "1500.00"
               interestRateBps: 640
               status: active
-              expectedVersion: 3
       responses:
         "200":
           description: Credit line updated successfully
@@ -1602,29 +639,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: >
-            Optimistic-locking conflict. The supplied `expectedVersion` did not
-            match the stored `version`, meaning a concurrent update won the
-            race. Re-read the credit line to get the current `version` and
-            retry the update with it. Body is RFC 7807 problem+json with
-            `code: version_conflict`.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
-              example:
-                type: "https://docs.creditra.dev/problems/version_conflict"
-                title: Conflict
-                status: 409
-                detail: "Credit line was modified concurrently (expected version 1, found 2). Re-read and retry."
-                code: version_conflict
-                resource: credit_line
-                details:
-                  expectedVersion: 1
-                  actualVersion: 2
-                data: null
-                error: "Credit line was modified concurrently (expected version 1, found 2). Re-read and retry."
 
     delete:
       tags: [Credit]
@@ -1654,7 +668,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/v1/credit/lines/{id}/transactions:
+  /api/credit/lines/{id}/transactions:
     get:
       tags: [Credit]
       operationId: getCreditLineTransactions
@@ -1662,10 +676,6 @@ paths:
       description: |
         Returns a paginated list of transactions for the given credit line.
         Supports optional filtering by transaction type and date range.
-
-        Conditional GET is supported via `ETag` / `If-None-Match`. The ETag
-        covers the filtered and paginated slice — different query strings
-        produce different validators. See docs/etag-caching.md.
       security: []
       parameters:
         - name: id
@@ -1674,7 +684,6 @@ paths:
           schema:
             type: string
           description: Credit line identifier
-        - $ref: "#/components/parameters/IfNoneMatch"
         - name: type
           in: query
           required: false
@@ -1696,14 +705,6 @@ paths:
             type: string
             format: date-time
           description: Include only transactions at or before this ISO 8601 timestamp (inclusive)
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
-          description: >
-            Opaque cursor. Presence enables standard cursor pagination
-            (`{ transactions, pagination: { limit, nextCursor, hasMore } }`).
         - name: page
           in: query
           required: false
@@ -1711,7 +712,7 @@ paths:
             type: integer
             minimum: 1
             default: 1
-          description: Page number (1-indexed, legacy mode)
+          description: Page number (1-indexed)
         - name: limit
           in: query
           required: false
@@ -1724,44 +725,25 @@ paths:
       responses:
         "200":
           description: Paginated list of transactions
-          headers:
-            ETag:
-              $ref: "#/components/headers/ETag"
-            Cache-Control:
-              $ref: "#/components/headers/CacheControlPrivateRevalidate"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TransactionHistoryResponse"
-              examples:
-                legacyPage:
-                  summary: Legacy page/limit
-                  value:
-                    data:
-                      transactions:
-                        - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-                          creditLineId: "line-abc"
-                          type: status_change
-                          amount: null
-                          currency: null
-                          timestamp: "2024-01-15T10:00:00.000Z"
-                          metadata:
-                            action: created
-                      total: 1
-                      page: 1
-                      limit: 20
-                      totalPages: 1
-                    error: null
-                cursorMode:
-                  summary: Standard cursor pagination
-                  value:
-                    data:
-                      transactions: []
-                      pagination:
-                        limit: 20
-                        nextCursor: null
-                        hasMore: false
-                    error: null
+              example:
+                data:
+                  transactions:
+                    - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      creditLineId: "line-abc"
+                      type: status_change
+                      amount: null
+                      currency: null
+                      timestamp: "2024-01-15T10:00:00.000Z"
+                      metadata:
+                        action: created
+                  total: 1
+                  page: 1
+                  limit: 20
+                  totalPages: 1
         "400":
           description: Invalid query parameter
           content:
@@ -1777,7 +759,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/v1/credit/lines/{id}/suspend:
+  /api/credit/lines/{id}/suspend:
     post:
       tags: [Credit]
       operationId: suspendCreditLine
@@ -1788,7 +770,6 @@ paths:
       security:
         - ApiKeyAuth: []
       parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
         - name: id
           in: path
           required: true
@@ -1824,16 +805,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: >
-            Invalid state transition (e.g. suspend of already suspended/closed).
-            RFC 7807 problem+json with `code: invalid_state_transition`.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
 
-  /api/v1/credit/lines/{id}/close:
+  /api/credit/lines/{id}/close:
     post:
       tags: [Credit]
       operationId: closeCreditLine
@@ -1844,7 +817,6 @@ paths:
       security:
         - ApiKeyAuth: []
       parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
         - name: id
           in: path
           required: true
@@ -1880,16 +852,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: >
-            Invalid state transition (e.g. close of already closed).
-            RFC 7807 problem+json with `code: invalid_state_transition`.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
 
-  /api/v1/credit/wallet/{walletAddress}/lines:
+  /api/credit/wallet/{walletAddress}/lines:
     get:
       tags: [Credit]
       operationId: getCreditLinesByWallet
@@ -1929,7 +893,7 @@ paths:
 
   # ── Risk Evaluation Routes ──────────────────────────────────────────────────
 
-  /api/v1/risk/evaluate:
+  /api/risk/evaluate:
     post:
       tags: [Risk]
       operationId: evaluateRisk
@@ -1939,8 +903,6 @@ paths:
         Rate limited: default 10 requests per minute per IP address.
         Configure via RATE_LIMIT_MAX_EVALUATE and RATE_LIMIT_WINDOW_MS env vars.
       security: []
-      parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -1955,13 +917,18 @@ paths:
           description: Risk evaluation result
           headers:
             X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
+              description: Maximum requests allowed per window
+              schema:
+                type: integer
+                example: 10
             X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
+              description: Requests remaining in current window
+              schema:
+                type: integer
             X-RateLimit-Reset:
-              $ref: "#/components/headers/X-RateLimit-Reset"
-            X-RateLimit-Bypass:
-              $ref: "#/components/headers/X-RateLimit-Bypass"
+              description: Unix timestamp when the rate limit window resets
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -1983,20 +950,14 @@ paths:
               example:
                 error: Validation failed
         "413":
-          description: Request body exceeds the per-endpoint size limit (default 100 KiB)
+          description: Request body exceeds the 100 kb limit
           content:
-            application/problem+json:
+            application/json:
               schema:
-                $ref: "#/components/schemas/PayloadTooLargeProblem"
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                type: https://httpstatuses.com/413
-                title: Payload Too Large
-                status: 413
-                detail: Payload Too Large. Request body exceeds the maximum size of 100kb for this endpoint.
-                limit: 102400
-                limitLabel: 100kb
                 data: null
-                error: Payload Too Large. Request body exceeds the maximum size of 100kb for this endpoint.
+                error: Request body too large. Maximum size is 100kb.
         "415":
           description: Content-Type is not application/json
           content:
@@ -2006,171 +967,8 @@ paths:
               example:
                 data: null
                 error: Content-Type must be application/json
-        "409":
-          description: >
-            Unique-constraint race while persisting an evaluation.
-            RFC 7807 problem+json (`unique_constraint_violation` / `duplicate_resource`).
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
 
-  /api/risk/evaluations:
-    post:
-      tags: [Risk]
-      operationId: createRiskEvaluation
-      summary: Create a risk evaluation (conflicts if unexpired exists)
-      description: |
-        Explicit create path. Returns 409 when a valid (unexpired) evaluation
-        already exists for the wallet unless `forceRefresh` is true.
-        Sensitive identifiers are never included in conflict details.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RiskEvaluateRequest"
-      responses:
-        "201":
-          description: New risk evaluation created
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RiskEvaluateApiResponse"
-        "400":
-          description: Validation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: >
-            Unexpired risk evaluation already exists for this wallet.
-            Use forceRefresh to replace. problem+json `code: duplicate_resource`.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
-              example:
-                type: "https://docs.creditra.dev/problems/duplicate_resource"
-                title: Conflict
-                status: 409
-                detail: "A valid risk evaluation already exists for this wallet. Pass forceRefresh to replace it."
-                code: duplicate_resource
-                resource: risk_evaluation
-                details:
-                  field: walletAddress
-                  reason: unexpired_evaluation
-                data: null
-                error: "A valid risk evaluation already exists for this wallet. Pass forceRefresh to replace it."
-
-  /api/webhooks/subscriptions:
-    get:
-      tags: [Webhooks]
-      operationId: listWebhookSubscriptions
-      summary: List runtime webhook subscriptions
-      security: []
-      responses:
-        "200":
-          description: Runtime subscriptions (env URLs are on GET /config)
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: object
-                    properties:
-                      subscriptions:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/WebhookSubscription"
-                  error:
-                    nullable: true
-    post:
-      tags: [Webhooks]
-      operationId: registerWebhookSubscription
-      summary: Register a runtime webhook subscription
-      description: |
-        Adds a subscriber URL at runtime. Duplicate URLs (including those from
-        `WEBHOOK_URLS`) return 409 problem+json. Full URL values that may carry
-        secrets are not echoed in conflict details.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/WebhookSubscriptionRequest"
-      responses:
-        "201":
-          description: Subscription registered
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    $ref: "#/components/schemas/WebhookSubscription"
-                  error:
-                    nullable: true
-        "400":
-          description: Invalid URL
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: >
-            Subscription URL already registered. problem+json
-            `code: duplicate_resource`, `resource: webhook_subscription`.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ConflictProblem"
-              example:
-                type: "https://docs.creditra.dev/problems/duplicate_resource"
-                title: Conflict
-                status: 409
-                detail: "A webhook subscription for this endpoint already exists."
-                code: duplicate_resource
-                resource: webhook_subscription
-                details:
-                  field: url
-                  reason: duplicate_url
-                data: null
-                error: "A webhook subscription for this endpoint already exists."
-
-  /api/risk/admin/recalibrate:
-    post:
-      tags: [Risk]
-      operationId: recalibrateRiskModel
-      summary: Trigger risk model recalibration
-      description: Admin-gated endpoint that triggers risk model recalibration.
-      security:
-        - ApiKeyAuth: []
-      responses:
-        "200":
-          description: Risk model recalibration triggered
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AdminRecalibrateResponse"
-        "401":
-          description: API key missing
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: Invalid API key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/v1/webhooks/config:
+  /api/webhooks/config:
     get:
       tags: [Webhooks]
       operationId: getWebhookConfig
@@ -2192,15 +990,13 @@ paths:
                 timeoutMs: 10000
                 configured: true
 
-  /api/v1/webhooks/test:
+  /api/webhooks/test:
     post:
       tags: [Webhooks]
       operationId: testWebhooks
       summary: Test webhook connectivity
       description: Sends a test payload to all configured webhook endpoints
       security: []
-      parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "200":
           description: Test results
@@ -2225,7 +1021,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/v1/webhooks/health:
+  /api/webhooks/health:
     get:
       tags: [Webhooks]
       operationId: getWebhookHealth
@@ -2244,76 +1040,6 @@ paths:
                 urls: 2
                 maxRetries: 3
                 timeoutMs: 10000
-
-  /api/webhooks/deliveries:
-    get:
-      tags: [Webhooks]
-      operationId: listWebhookDeliveries
-      summary: List webhook delivery records (cursor pagination)
-      description: |
-        Returns outbound delivery attempts using the standard cursor pagination
-        model. Sort order is `updatedAt DESC` with a stable `drawId::url` tie-break.
-        Cursors are opaque; pass `nextCursor` back verbatim.
-      security: []
-      parameters:
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
-          description: Opaque cursor from a previous page (empty/omit for first page)
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 25
-          description: Page size
-        - name: status
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [delivered, failed, dead_letter]
-          description: Optional status filter
-      responses:
-        "200":
-          description: Cursor page of delivery records
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, error]
-                properties:
-                  data:
-                    type: object
-                    required: [items, pagination]
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/WebhookDeliveryRecord"
-                      pagination:
-                        $ref: "#/components/schemas/CursorPagination"
-                  error:
-                    type: string
-                    nullable: true
-              example:
-                data:
-                  items: []
-                  pagination:
-                    limit: 25
-                    nextCursor: null
-                    hasMore: false
-                error: null
-        "400":
-          description: Invalid query parameter
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
 
   /api/risk/evaluations/{id}:
     get:
@@ -2345,7 +1071,7 @@ paths:
                 error: Risk evaluation not found
                 id: "abc123"
 
-  /api/v1/risk/wallet/{walletAddress}/latest:
+  /api/risk/wallet/{walletAddress}/latest:
     get:
       tags: [Risk]
       operationId: getLatestRiskEvaluation
@@ -2378,7 +1104,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/v1/risk/wallet/{walletAddress}/history:
+  /api/risk/wallet/{walletAddress}/history:
     get:
       tags: [Risk]
       operationId: getRiskEvaluationHistory
@@ -2420,303 +1146,6 @@ paths:
                       $ref: "#/components/schemas/RiskEvaluation"
         "400":
           description: Invalid parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  # ── Compliance Export Routes (admin) ────────────────────────────────────────
-
-  /api/admin/exports/credit-lines:
-    get:
-      tags: [Compliance Exports]
-      operationId: exportCreditLines
-      summary: Export credit lines (CSV/JSON)
-      description: |
-        Admin-only streaming export of credit lines for a required date range.
-        Max range 90 days; max 5000 rows per request. See docs/COMPLIANCE_EXPORTS.md.
-      security:
-        - AdminApiKeyAuth: []
-      parameters:
-        - name: from
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-          description: Inclusive lower bound (ISO-8601 UTC)
-        - name: to
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-          description: Inclusive upper bound (ISO-8601 UTC); span ≤ 90 days
-        - name: format
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [json, csv]
-            default: json
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 5000
-            default: 1000
-        - name: offset
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 0
-            default: 0
-        - name: status
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [active, suspended, closed, pending]
-        - name: walletAddress
-          in: query
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Export payload (JSON envelope or CSV attachment)
-          headers:
-            X-Export-Count:
-              schema: { type: integer }
-            X-Export-Limit:
-              schema: { type: integer }
-            X-Export-Offset:
-              schema: { type: integer }
-            X-Export-Truncated:
-              schema: { type: string, enum: [true, false] }
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ComplianceExportResponse"
-            text/csv:
-              schema:
-                type: string
-        "400":
-          description: Validation failed (missing range, span too large, bad limit)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: Export rate limit exceeded
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RateLimitErrorResponse"
-        "503":
-          description: Admin authentication not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/admin/exports/transactions:
-    get:
-      tags: [Compliance Exports]
-      operationId: exportTransactions
-      summary: Export transactions (CSV/JSON)
-      description: |
-        Admin-only streaming export of transactions for a required date range.
-        Max range 90 days; max 5000 rows per request.
-      security:
-        - AdminApiKeyAuth: []
-      parameters:
-        - name: from
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-        - name: to
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-        - name: format
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [json, csv]
-            default: json
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 5000
-            default: 1000
-        - name: offset
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 0
-            default: 0
-        - name: status
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [pending, confirmed, failed, cancelled]
-        - name: type
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [borrow, repay, interest_accrual, fee, status_change]
-        - name: creditLineId
-          in: query
-          required: false
-          schema:
-            type: string
-        - name: walletAddress
-          in: query
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Export payload (JSON envelope or CSV attachment)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ComplianceExportResponse"
-            text/csv:
-              schema:
-                type: string
-        "400":
-          description: Validation failed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: Export rate limit exceeded
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RateLimitErrorResponse"
-        "503":
-          description: Admin authentication not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/admin/exports/audit:
-    get:
-      tags: [Compliance Exports]
-      operationId: exportAuditLog
-      summary: Export lifecycle audit records (CSV/JSON)
-      description: |
-        Admin-only streaming export of credit lifecycle audit records for a
-        required date range. Max range 90 days; max 5000 rows per request.
-      security:
-        - AdminApiKeyAuth: []
-      parameters:
-        - name: from
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-        - name: to
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-        - name: format
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [json, csv]
-            default: json
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 5000
-            default: 1000
-        - name: offset
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 0
-            default: 0
-        - name: action
-          in: query
-          required: false
-          schema:
-            type: string
-            example: credit.opened
-        - name: creditLineId
-          in: query
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Export payload (JSON envelope or CSV attachment)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ComplianceExportResponse"
-            text/csv:
-              schema:
-                type: string
-        "400":
-          description: Validation failed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Missing or invalid admin key
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: Export rate limit exceeded
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RateLimitErrorResponse"
-        "503":
-          description: Admin authentication not configured
           content:
             application/json:
               schema:

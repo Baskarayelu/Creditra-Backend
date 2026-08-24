@@ -1,31 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { StrKey, nativeToScVal } from '@stellar/stellar-sdk';
 import { ReconciliationService, type OnChainCreditRecord, type SorobanRpcClient } from '../services/reconciliationService.js';
 import { ReconciliationWorker } from '../services/reconciliationWorker.js';
 import { InMemoryCreditLineRepository } from '../repositories/memory/InMemoryCreditLineRepository.js';
 import { InMemoryJobQueue } from '../services/jobQueue.js';
-import { StellarSorobanClient } from '../services/sorobanClient.js';
-
-const serviceLoggerMock = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-}));
-
-vi.mock('../utils/serviceLogger.js', () => ({
-  createServiceLogger: () => serviceLoggerMock,
-}));
-
-const TEST_PUBLIC_KEY = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1));
-const TEST_CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32, 1));
-
-function pageXdr(value: unknown): string {
-  return nativeToScVal(value).toXDR('base64');
-}
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200, statusText: 'OK' });
-}
 
 class TestSorobanClient implements SorobanRpcClient {
   private records: OnChainCreditRecord[] = [];
@@ -48,9 +25,6 @@ describe('Reconciliation Integration', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    serviceLoggerMock.info.mockReset();
-    serviceLoggerMock.warn.mockReset();
-    serviceLoggerMock.error.mockReset();
     repository = new InMemoryCreditLineRepository();
     sorobanClient = new TestSorobanClient();
     jobQueue = new InMemoryJobQueue(10, 20);
@@ -92,13 +66,8 @@ describe('Reconciliation Integration', () => {
 
     // Verify: Job failed due to critical mismatch
     expect(jobQueue.getFailedJobs()).toHaveLength(1);
-    expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-      'reconciliation-worker:mismatches-alert',
-      expect.objectContaining({
-        mismatchCount: 1,
-        criticalCount: 1,
-        warningCount: 0,
-      }),
+    expect(console.error).toHaveBeenCalledWith(
+      '[ReconciliationWorker] ALERT: Reconciliation found 1 mismatches (1 critical, 0 warnings)'
     );
   });
 
@@ -127,63 +96,9 @@ describe('Reconciliation Integration', () => {
 
     // Verify: Job succeeded
     expect(jobQueue.getFailedJobs()).toHaveLength(0);
-    expect(serviceLoggerMock.info).toHaveBeenCalledWith(
-      'reconciliation-worker:job:complete',
-      expect.objectContaining({ totalChecked: 1 }),
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining('completed successfully')
     );
-  });
-
-  it('end-to-end: real Soroban client output flows through reconciliation', async () => {
-    const creditLine = await repository.create({
-      walletAddress: TEST_PUBLIC_KEY,
-      creditLimit: '10000.00',
-      interestRateBps: 500,
-    });
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse({
-        result: {
-          results: [
-            {
-              xdr: pageXdr([
-                [
-                  0,
-                  {
-                    borrower: TEST_PUBLIC_KEY,
-                    credit_limit: 10000n,
-                    utilized_amount: 0n,
-                    interest_rate_bps: creditLine.interestRateBps,
-                    status: 'active',
-                  },
-                ],
-              ]),
-            },
-          ],
-        },
-      }),
-    );
-    const realSorobanClient = new StellarSorobanClient(
-      {
-        rpcUrl: 'https://soroban-testnet.stellar.org',
-        contractId: TEST_CONTRACT_ID,
-        networkPassphrase: 'Test SDF Network ; September 2015',
-      },
-      {
-        rpcUrl: 'https://soroban-testnet.stellar.org',
-        networkPassphrase: 'Test SDF Network ; September 2015',
-        timeoutMs: 50,
-        maxRetries: 0,
-        retryJitterMs: 0,
-      },
-      fetchImpl as unknown as typeof fetch,
-      { sleep: vi.fn().mockResolvedValue(undefined), random: () => 0 },
-    );
-    const realService = new ReconciliationService(repository, realSorobanClient, jobQueue);
-
-    const result = await realService.reconcile();
-
-    expect(result.mismatches).toEqual([]);
-    expect(result.errors).toEqual([]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('end-to-end: handles warning-level mismatches without failing', async () => {
@@ -211,13 +126,8 @@ describe('Reconciliation Integration', () => {
 
     // Verify: Job succeeded despite warning
     expect(jobQueue.getFailedJobs()).toHaveLength(0);
-    expect(serviceLoggerMock.error).toHaveBeenCalledWith(
-      'reconciliation-worker:mismatches-alert',
-      expect.objectContaining({
-        mismatchCount: 1,
-        criticalCount: 0,
-        warningCount: 1,
-      }),
+    expect(console.error).toHaveBeenCalledWith(
+      '[ReconciliationWorker] ALERT: Reconciliation found 1 mismatches (0 critical, 1 warnings)'
     );
   });
 
